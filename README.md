@@ -16,15 +16,15 @@ Cross-platform command-line tool for creating and managing GMCore applications.
 
 ```bash
 # Download the latest release
-curl -fsSL https://github.com/gmcorenet/gmcore/releases/latest/download/gmcore-cli-linux-amd64 -o /usr/local/bin/gmcore-cli
+curl -fsSL https://github.com/gmcorenet/gmcore/releases/latest/download/gmcore-linux-amd64 -o /usr/local/bin/gmcore
 
 # Make it executable
-chmod +x /usr/local/bin/gmcore-cli
+chmod +x /usr/local/bin/gmcore
 ```
 
 ### Windows
 
-1. Download `gmcore-cli-windows-amd64.exe` from the [releases page](https://github.com/gmcorenet/gmcore/releases)
+1. Download `gmcore-windows-amd64.exe` from the [releases page](https://github.com/gmcorenet/gmcore/releases)
 2. Add it to your PATH
 
 ### Build from Source
@@ -32,25 +32,25 @@ chmod +x /usr/local/bin/gmcore-cli
 ```bash
 git clone https://github.com/gmcorenet/gmcore.git
 cd gmcore
-go build -o gmcore-cli .
-sudo mv gmcore-cli /usr/local/bin/
+go build -o gmcore .
+sudo mv gmcore /usr/local/bin/
 ```
 
 ## Quick Start
 
 ```bash
 # Create a new application
-gmcore-cli create myapp
+gmcore create myapp
 
 # List installed applications
-gmcore-cli list
+gmcore list
 
 # Check application status
-gmcore-cli status
-gmcore-cli status myapp
+gmcore status
+gmcore status myapp
 
 # Get help
-gmcore-cli --help
+gmcore --help
 ```
 
 ## Commands
@@ -59,24 +59,24 @@ gmcore-cli --help
 
 | Command | Description |
 |---------|-------------|
-| `gmcore-cli create <appname>` | Create a new application |
-| `gmcore-cli create <appname> --version=<ver>` | Create with specific framework version |
-| `gmcore-cli remove <appname>` | Remove an application |
-| `gmcore-cli remove <appname> --purge` | Remove application and all data |
-| `gmcore-cli list` | List all installed applications |
-| `gmcore-cli status [appname]` | Show application status |
+| `gmcore create <appname>` | Create a new application |
+| `gmcore create <appname> --version=<ver>` | Create with specific framework version |
+| `gmcore remove <appname>` | Remove an application |
+| `gmcore remove <appname> --purge` | Remove application and all data |
+| `gmcore list` | List all installed applications |
+| `gmcore status [appname]` | Show application status |
 
 ### CLI Management
 
 | Command | Description |
 |---------|-------------|
-| `gmcore-cli list-versions` | List available framework versions |
-| `gmcore-cli self-update` | Update CLI to latest version |
-| `gmcore-cli self-update <ver>` | Update to specific version |
-| `gmcore-cli version` | Show CLI version |
-| `gmcore-cli install` | Install CLI system-wide (requires root) |
-| `gmcore-cli uninstall` | Uninstall CLI |
-| `gmcore-cli uninstall --purge` | Uninstall and remove all apps |
+| `gmcore list-versions` | List available framework versions |
+| `gmcore self-update` | Update CLI to latest version |
+| `gmcore self-update <ver>` | Update to specific version |
+| `gmcore version` | Show CLI version |
+| `gmcore install` | Install CLI system-wide (requires root) |
+| `gmcore uninstall` | Uninstall CLI |
+| `gmcore uninstall --purge` | Uninstall and remove all apps |
 
 ## Application Directory Structure
 
@@ -106,7 +106,7 @@ When you create an app, the following structure is created:
 cd /opt/gmcore/myapp
 
 # Run application commands
-gmcore-cli <command>
+gmcore <command>
 
 # Build the application
 go build -o bin/myapp cmd/app/main.go
@@ -134,10 +134,10 @@ go build -o bin/myapp cmd/app/main.go
 
 ```bash
 # Remove just the CLI
-sudo gmcore-cli uninstall
+sudo gmcore uninstall
 
 # Remove CLI and all applications
-sudo gmcore-cli uninstall --purge
+sudo gmcore uninstall --purge
 ```
 
 ## License
