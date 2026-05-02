@@ -11,16 +11,18 @@ Cross-platform command-line tool for creating and managing GMCore applications.
 
 ## Installation
 
-### Linux / macOS
+### Build from source
 
 ```bash
-curl -fsSL https://github.com/gmcorenet/gmcore/releases/latest/download/gmcore-cli-linux-amd64 -o /usr/local/bin/gmcore-cli
-chmod +x /usr/local/bin/gmcore-cli
+git clone https://github.com/gmcorenet/gmcore.git
+cd gmcore
+go build -o gmcore-cli .
+sudo mv gmcore-cli /usr/local/bin/
 ```
 
-### Windows
+### Using released binaries
 
-Download the latest release from the [releases page](https://github.com/gmcorenet/gmcore/releases) and add it to your PATH.
+Download pre-built binaries from the [Releases](https://github.com/gmcorenet/gmcore/releases) page.
 
 ## Quick Start
 
