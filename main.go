@@ -19,7 +19,7 @@ import (
 	"github.com/gmcorenet/cli/internal/version"
 )
 
-const cliVersion = "v0.2.0"
+const cliVersion = "v0.3.0"
 const repo = "gmcorenet/gmcore"
 
 var availableCommands = []string{"create", "remove", "list", "status", "version", "self-update", "bundle", "bundles", "bundle-make"}
