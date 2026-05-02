@@ -134,24 +134,23 @@ func main() {
 		}
 
 	case "bundle":
-		tier := "official"
-		bundleName := ""
-		version := "latest"
-		for _, arg := range os.Args[2:] {
-			if strings.HasPrefix(arg, "--tier=") {
-				tier = strings.TrimPrefix(arg, "--tier=")
-			} else if strings.HasPrefix(arg, "--version=") {
-				version = strings.TrimPrefix(arg, "--version=")
-			} else if !strings.HasPrefix(arg, "--") && bundleName == "" {
-				bundleName = arg
-			}
-		}
-		if bundleName == "" {
-			fmt.Fprintln(os.Stderr, "Usage: gmcore bundle <name> [--tier=official] [--version=latest]")
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: gmcore bundle <command> [flags]")
+			fmt.Fprintln(os.Stderr, "Commands:")
+			fmt.Fprintln(os.Stderr, "  make <name>     Create a new bundle scaffold")
+			fmt.Fprintln(os.Stderr, "  install <name>  Install a bundle from the registry")
 			os.Exit(1)
 		}
-		if err := installBundle(tier, bundleName, version); err != nil {
-			fmt.Fprintln(os.Stderr, "Error:", err)
+
+		subcmd := os.Args[2]
+
+		switch subcmd {
+		case "make":
+			handleBundleMake(os.Args[3:])
+		case "install":
+			handleBundleInstall(os.Args[3:])
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown bundle command: %s\n", subcmd)
 			os.Exit(1)
 		}
 
@@ -1167,5 +1166,127 @@ func listBundles() error {
 	fmt.Println("")
 
 	return nil
+}
+
+func handleBundleMake(args []string) {
+	bundleName := ""
+	folder := ""
+
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--folder=") {
+			folder = strings.TrimPrefix(arg, "--folder=")
+		} else if !strings.HasPrefix(arg, "--") && bundleName == "" {
+			bundleName = arg
+		}
+	}
+
+	if bundleName == "" {
+		fmt.Fprintln(os.Stderr, "Usage: gmcore bundle make <name> [--folder=<path>]")
+		os.Exit(1)
+	}
+
+	if folder == "" {
+		folder = "./" + bundleName
+	}
+
+	if err := createBundleScaffold(folder, bundleName); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Bundle '%s' scaffold created at %s\n", bundleName, folder)
+	fmt.Println("")
+	fmt.Println("Next steps:")
+	fmt.Printf("  1. Edit %s/v1.0.0.yaml with your components\n", folder)
+	fmt.Printf("  2. Review the structure in %s/\n", folder)
+	fmt.Printf("  3. Submit a PR to https://github.com/gmcorenet/bundles\n")
+}
+
+func createBundleScaffold(folder, name string) error {
+	if err := os.MkdirAll(folder, 0755); err != nil {
+		return fmt.Errorf("failed to create folder: %w", err)
+	}
+
+	template := fmt.Sprintf(`version: "1.0.0"
+released: "%s"
+repo: YOUR_USERNAME/bundle-%s
+
+components:
+  # Add your components here
+  # Example:
+  # mycomponent:
+  #   version: "1.0.0"
+  #   verify: true
+`, time.Now().Format("2006-01-02"), name)
+
+	v1Path := filepath.Join(folder, "v1.0.0.yaml")
+	if err := os.WriteFile(v1Path, []byte(template), 0644); err != nil {
+		return fmt.Errorf("failed to create v1.0.0.yaml: %w", err)
+	}
+
+	readme := fmt.Sprintf(`# Bundle %s
+
+This is a GMCore bundle.
+
+## Structure
+
+- `v1.0.0.yaml` - Version 1.0.0 of this bundle
+- `components/` - (optional) Component source code
+
+## Publishing
+
+1. Fork https://github.com/gmcorenet/bundles
+2. Copy this folder to the appropriate tier:
+   - `official/` - Officially maintained bundles
+   - `approved/` - Community bundles that have been reviewed
+   - `wild/` - Unreviewed community bundles
+3. Submit a pull request
+
+## Bundle Format
+
+```yaml
+version: "1.0.0"
+released: "2024-01-01"
+repo: YOUR_USERNAME/bundle-%s
+
+components:
+  component-name:
+    version: "1.0.0"
+    verify: true  # Set to false if no verification needed
+```
+`, name, name)
+
+	readmePath := filepath.Join(folder, "README.md")
+	if err := os.WriteFile(readmePath, []byte(readme), 0644); err != nil {
+		return fmt.Errorf("failed to create README.md: %w", err)
+	}
+
+	return nil
+}
+
+func handleBundleInstall(args []string) {
+	tier := "official"
+	bundleName := ""
+	version := "latest"
+
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--tier=") {
+			tier = strings.TrimPrefix(arg, "--tier=")
+		} else if strings.HasPrefix(arg, "--version=") {
+			version = strings.TrimPrefix(arg, "--version=")
+		} else if !strings.HasPrefix(arg, "--") && bundleName == "" {
+			bundleName = arg
+		}
+	}
+
+	if bundleName == "" {
+		fmt.Fprintln(os.Stderr, "Usage: gmcore bundle install <name> [--tier=official] [--version=latest]")
+		os.Exit(1)
+	}
+
+	if err := installBundle(tier, bundleName, version); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 }
 
