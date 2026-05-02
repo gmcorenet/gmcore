@@ -1,0 +1,12 @@
+# Binaries
+gmcore-cli
+gmcore-cli-*
+
+# Test binary
+*.test
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
