@@ -22,7 +22,7 @@ import (
 const cliVersion = "0.1.0"
 const repo = "gmcorenet/gmcore"
 
-var availableCommands = []string{"create", "remove", "list", "status", "version", "self-update", "bundle", "bundles"}
+var availableCommands = []string{"create", "remove", "list", "status", "version", "self-update", "bundle", "bundles", "bundle-make"}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -1197,7 +1197,7 @@ func handleBundleMake(args []string) {
 	fmt.Printf("Bundle '%s' scaffold created at %s\n", bundleName, folder)
 	fmt.Println("")
 	fmt.Println("Next steps:")
-	fmt.Printf("  1. Edit %s/v1.0.0.yaml with your components\n", folder)
+	fmt.Printf("  1. Edit %s/manifest.yaml with your components\n", folder)
 	fmt.Printf("  2. Review the structure in %s/\n", folder)
 	fmt.Printf("  3. Submit a PR to https://github.com/gmcorenet/bundles\n")
 }
@@ -1207,58 +1207,120 @@ func createBundleScaffold(folder, name string) error {
 		return fmt.Errorf("failed to create folder: %w", err)
 	}
 
-	template := fmt.Sprintf(`version: "1.0.0"
+	if err := os.MkdirAll(filepath.Join(folder, "cmd", name), 0755); err != nil {
+		return fmt.Errorf("failed to create cmd folder: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Join(folder, "internal", name), 0755); err != nil {
+		return fmt.Errorf("failed to create internal folder: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Join(folder, "services"), 0755); err != nil {
+		return fmt.Errorf("failed to create services folder: %w", err)
+	}
+
+	manifest := fmt.Sprintf(`version: "1.0.0"
+name: "%s"
 released: "%s"
 repo: YOUR_USERNAME/bundle-%s
 
 components:
-  # Add your components here
-  # Example:
-  # mycomponent:
-  #   version: "1.0.0"
-  #   verify: true
-`, time.Now().Format("2006-01-02"), name)
+  %s:
+    path: internal/%s
+    version: "1.0.0"
+    verify: true
+`, name, time.Now().Format("2006-01-02"), name, name, name)
 
-	v1Path := filepath.Join(folder, "v1.0.0.yaml")
-	if err := os.WriteFile(v1Path, []byte(template), 0644); err != nil {
-		return fmt.Errorf("failed to create v1.0.0.yaml: %w", err)
+	manifestPath := filepath.Join(folder, "manifest.yaml")
+	if err := os.WriteFile(manifestPath, []byte(manifest), 0644); err != nil {
+		return fmt.Errorf("failed to create manifest.yaml: %w", err)
+	}
+
+	mainGo := fmt.Sprintf(`package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("%s bundle v1.0.0")
+}
+`, name)
+	mainPath := filepath.Join(folder, "cmd", name, "main.go")
+	if err := os.WriteFile(mainPath, []byte(mainGo), 0644); err != nil {
+		return fmt.Errorf("failed to create main.go: %w", err)
+	}
+
+	componentGo := fmt.Sprintf(`package %s
+
+type %s struct{}
+
+func New() *%s {
+	return &%s{}
+}
+
+func (b *%s) Run() error {
+	return nil
+}
+`, name, strings.Title(name), name, name, name)
+	componentPath := filepath.Join(folder, "internal", name, name+".go")
+	if err := os.WriteFile(componentPath, []byte(componentGo), 0644); err != nil {
+		return fmt.Errorf("failed to create component.go: %w", err)
 	}
 
 	readme := fmt.Sprintf(`# Bundle %s
 
-This is a GMCore bundle.
+GMCore bundle for %s functionality.
 
 ## Structure
 
-- `v1.0.0.yaml` - Version 1.0.0 of this bundle
-- `components/` - (optional) Component source code
+```
+.
+├── manifest.yaml      # Bundle manifest
+├── cmd/              # Application entry points
+│   └── %[1]s/
+│       └── main.go
+├── internal/         # Internal packages
+│   └── %[1]s/
+│       └── %[1]s.go
+└── services/         # Service definitions
+```
 
 ## Publishing
 
 1. Fork https://github.com/gmcorenet/bundles
 2. Copy this folder to the appropriate tier:
-   - `official/` - Officially maintained bundles
-   - `approved/` - Community bundles that have been reviewed
-   - `wild/` - Unreviewed community bundles
+   - \`official/\` - Officially maintained bundles
+   - \`approved/\` - Community bundles that have been reviewed
+   - \`wild/\` - Unreviewed community bundles
 3. Submit a pull request
 
-## Bundle Format
+## Bundle Manifest
+
+Edit \`manifest.yaml\` to define your bundle:
 
 ```yaml
 version: "1.0.0"
-released: "2024-01-01"
-repo: YOUR_USERNAME/bundle-%s
+name: "%[1]s"
+released: "2026-05-02"
+repo: YOUR_USERNAME/bundle-%[1]s
 
 components:
-  component-name:
+  %[1]s:
+    path: internal/%[1]s
     version: "1.0.0"
-    verify: true  # Set to false if no verification needed
+    verify: true
 ```
 `, name, name)
 
 	readmePath := filepath.Join(folder, "README.md")
 	if err := os.WriteFile(readmePath, []byte(readme), 0644); err != nil {
 		return fmt.Errorf("failed to create README.md: %w", err)
+	}
+
+	goMod := fmt.Sprintf(`module github.com/YOUR_USERNAME/bundle-%s
+
+go 1.21
+`, name)
+	goModPath := filepath.Join(folder, "go.mod")
+	if err := os.WriteFile(goModPath, []byte(goMod), 0644); err != nil {
+		return fmt.Errorf("failed to create go.mod: %w", err)
 	}
 
 	return nil
