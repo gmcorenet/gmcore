@@ -4,10 +4,12 @@ Cross-platform command-line tool for creating and managing GMCore applications.
 
 ## Features
 
-- Create new GMCore applications with a single command
+- Create new GMCore applications from manifest recipes
 - List and manage installed applications
 - Check application status
+- Install/uninstall as system service
 - Self-update to latest version
+- List available framework versions
 - Full support for Linux, macOS, and Windows
 
 ## Installation
@@ -78,6 +80,13 @@ gmcore --help
 | `gmcore uninstall` | Uninstall CLI |
 | `gmcore uninstall --purge` | Uninstall and remove all apps |
 
+### Service Management (Linux)
+
+| Command | Description |
+|---------|-------------|
+| `gmcore install <appname>` | Install app as systemd service |
+| `gmcore uninstall <appname>` | Remove app service |
+
 ## Application Directory Structure
 
 When you create an app, the following structure is created:
@@ -96,7 +105,7 @@ When you create an app, the following structure is created:
 │   └── tmp/               # Temporary files
 ├── vendor/gmcore/         # Framework source
 ├── migrations/            # Database migrations
-└── tests/                # Test files
+└── tests/                 # Test files
 ```
 
 ## Running Your Application
