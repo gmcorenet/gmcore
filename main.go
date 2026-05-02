@@ -106,7 +106,7 @@ func main() {
 		}
 
 	case "version", "--version", "-v":
-		fmt.Printf("gmcore-cli %s\n", cliVersion)
+		fmt.Printf("gmcore %s\n", cliVersion)
 
 	case "install":
 		if err := install(); err != nil {
