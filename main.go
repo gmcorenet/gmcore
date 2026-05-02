@@ -12,14 +12,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gmcorenet/cli/internal/bundle"
 	"github.com/gmcorenet/cli/internal/download"
+	"github.com/gmcorenet/cli/internal/installer"
+	"github.com/gmcorenet/cli/internal/manifest"
 	"github.com/gmcorenet/cli/internal/version"
 )
 
 const cliVersion = "0.1.0"
 const repo = "gmcorenet/gmcore"
 
-var availableCommands = []string{"create", "remove", "list", "status", "version", "self-update"}
+var availableCommands = []string{"create", "remove", "list", "status", "version", "self-update", "bundle", "bundles"}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -126,6 +129,34 @@ func main() {
 			}
 		}
 		if err := uninstallCLI(purge, confirmPurge); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+
+	case "bundle":
+		tier := "official"
+		bundleName := ""
+		version := "latest"
+		for _, arg := range os.Args[2:] {
+			if strings.HasPrefix(arg, "--tier=") {
+				tier = strings.TrimPrefix(arg, "--tier=")
+			} else if strings.HasPrefix(arg, "--version=") {
+				version = strings.TrimPrefix(arg, "--version=")
+			} else if !strings.HasPrefix(arg, "--") && bundleName == "" {
+				bundleName = arg
+			}
+		}
+		if bundleName == "" {
+			fmt.Fprintln(os.Stderr, "Usage: gmcore bundle <name> [--tier=official] [--version=latest]")
+			os.Exit(1)
+		}
+		if err := installBundle(tier, bundleName, version); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+
+	case "bundles":
+		if err := listBundles(); err != nil {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 			os.Exit(1)
 		}
@@ -494,7 +525,7 @@ func copyFile(src, dest string) error {
 	return err
 }
 
-func createApp(appName, frameworkVersion string) error {
+func createApp(appName, manifestVersion string) error {
 	if appName == "" {
 		return fmt.Errorf("appname cannot be empty")
 	}
@@ -519,34 +550,56 @@ func createApp(appName, frameworkVersion string) error {
 		return fmt.Errorf("failed to create user: %w", err)
 	}
 
-	fmt.Printf("Creating application %s with framework %s...\n", appName, frameworkVersion)
+	fmt.Printf("Creating application %s...\n", appName)
 
-	versionInfo, err := version.Resolve(frameworkVersion)
+	fmt.Println("")
+	fmt.Println("Fetching manifest...")
+	m, err := manifest.Fetch("gmcorenet", "manifest", manifestVersion)
 	if err != nil {
-		return fmt.Errorf("failed to resolve version: %w", err)
+		return fmt.Errorf("failed to fetch manifest: %w", err)
 	}
 
-	downloadURL := fmt.Sprintf("https://github.com/gmcorenet/sdk/archive/refs/tags/%s.tar.gz", versionInfo.Tag)
+	fmt.Printf("Manifest: %s (version %s)\n", m.Name, m.Version)
+	fmt.Println("")
 
-	tmpDir, err := os.MkdirTemp("", "gmcore-*")
-	if err != nil {
-		return fmt.Errorf("failed to create temp directory: %w", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	inst := installer.New(appPath, true)
 
-	tarballPath := filepath.Join(tmpDir, "framework.tar.gz")
-
-	if err := download.File(downloadURL, tarballPath); err != nil {
-		return fmt.Errorf("failed to download framework: %w", err)
-	}
-
-	if err := os.MkdirAll(appPath, 0755); err != nil {
-		return fmt.Errorf("failed to create app directory: %w", err)
+	fmt.Println("Installing framework...")
+	framework := m.GetFramework()
+	if err := inst.InstallComponent(installer.Component{
+		Repo:    framework.Repo,
+		Release: framework.Release,
+		Path:    framework.Path,
+	}); err != nil {
+		return fmt.Errorf("failed to install framework: %w", err)
 	}
 
-	if err := extractTarGz(tarballPath, appPath); err != nil {
-		os.RemoveAll(appPath)
-		return fmt.Errorf("failed to extract framework: %w", err)
+	fmt.Println("")
+	fmt.Println("Installing skeleton...")
+	skeleton := m.GetSkeleton()
+	if err := inst.InstallComponent(installer.Component{
+		Repo:    skeleton.Repo,
+		Release: skeleton.Release,
+		Path:    ".",
+	}); err != nil {
+		return fmt.Errorf("failed to install skeleton: %w", err)
+	}
+
+	fmt.Println("")
+	fmt.Printf("Installing %d SDKs...\n", len(m.GetSDKs()))
+	for _, sdk := range m.GetSDKs() {
+		fmt.Printf("  - %s (%s)\n", sdk.Name, sdk.Release)
+		if err := inst.InstallComponent(installer.Component{
+			Repo:    "gmcorenet/" + sdk.Name,
+			Release: sdk.Release,
+			Path:    "vendor/sdks/" + sdk.Name,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "    Warning: failed to install %s: %v\n", sdk.Name, err)
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Join(appPath, "vendor"), 0755); err != nil {
+		return fmt.Errorf("failed to create vendor directory: %w", err)
 	}
 
 	if runtime.GOOS != "windows" {
@@ -570,12 +623,14 @@ func createApp(appName, frameworkVersion string) error {
 		}
 	}
 
+	fmt.Println("")
 	fmt.Printf("Application %s created successfully at %s\n", appName, appPath)
 	fmt.Println("")
 	fmt.Println("Next steps:")
 	fmt.Printf("  cd %s\n", appPath)
 	fmt.Println("  go mod tidy")
-	fmt.Println("  gmcore-cli status", appName)
+	fmt.Println("  go build -o bin/myapp cmd/server/main.go")
+	fmt.Println("  gmcore status", appName)
 
 	return nil
 }
@@ -1074,5 +1129,43 @@ func getGroupID(groupname string) int {
 		}
 	}
 	return -1
+}
+
+func installBundle(tier, name, version string) error {
+	fmt.Printf("Installing bundle %s from %s tier...\n", name, tier)
+
+	b, err := bundle.Fetch(tier, name, version)
+	if err != nil {
+		return fmt.Errorf("failed to fetch bundle: %w", err)
+	}
+
+	fmt.Printf("Bundle: %s\n", b.GetRepo())
+	fmt.Printf("Version: %s (released: %s)\n", b.GetVersion(), b.GetReleased())
+	fmt.Printf("Components: %d\n", len(b.GetComponents()))
+	fmt.Println("")
+
+	for _, comp := range b.GetComponents() {
+		fmt.Printf("  - %s (%s)\n", comp.Name, comp.Version)
+	}
+
+	return nil
+}
+
+func listBundles() error {
+	fmt.Println("Available bundles:")
+	fmt.Println("")
+	fmt.Println("Official tier:")
+	fmt.Println("  (no bundles yet - submit via PR)")
+	fmt.Println("")
+	fmt.Println("Approved tier:")
+	fmt.Println("  (no bundles yet)")
+	fmt.Println("")
+	fmt.Println("Wild tier:")
+	fmt.Println("  (no bundles yet)")
+	fmt.Println("")
+	fmt.Println("Use: gmcore bundle <name> --tier=<tier> --version=<version>")
+	fmt.Println("")
+
+	return nil
 }
 
