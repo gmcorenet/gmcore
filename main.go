@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,7 +17,7 @@ import (
 )
 
 const cliVersion = "0.1.0"
-const repo = "gmcorenet/cli"
+const repo = "gmcorenet/gmcore"
 
 var availableCommands = []string{"create", "remove", "list", "status", "version", "self-update"}
 
@@ -874,7 +875,7 @@ func selfUpdate(targetVersion string) error {
 
 	platform := getPlatform()
 	arch := getArch()
-	binaryName := fmt.Sprintf("gmcore-cli-%s-%s", platform, arch)
+	binaryName := fmt.Sprintf("gmcore-%s-%s", platform, arch)
 
 	if targetVersion == "" {
 		fmt.Println("Checking for latest version...")
@@ -902,7 +903,7 @@ func selfUpdate(targetVersion string) error {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	tmpBinary := filepath.Join(tmpDir, "gmcore-cli")
+	tmpBinary := filepath.Join(tmpDir, "gmcore")
 
 	if err := download.File(downloadURL, tmpBinary); err != nil {
 		return fmt.Errorf("failed to download: %w\n\nVersion %s may not exist. Run 'gmcore-cli list-versions' to see available versions.", err, targetVersion)
@@ -933,16 +934,14 @@ func getLatestRelease() (string, error) {
 		return "", fmt.Errorf("unexpected status: %d", resp.StatusCode)
 	}
 
-	data, _ := io.ReadAll(resp.Body)
-	s := string(data)
-
-	if idx := strings.Index(s, "\"tag_name\""); idx != -1 {
-		start := strings.Index(s[idx:], "\"") + idx + 1
-		end := start + strings.Index(s[start:], "\"")
-		return strings.TrimSpace(s[start:end]), nil
+	var release struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	return "", fmt.Errorf("tag_name not found in response")
+	return release.TagName, nil
 }
 
 func getPlatform() string {
