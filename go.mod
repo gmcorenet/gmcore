@@ -1,4 +1,4 @@
-module github.com/gmcorenet/cli
+module github.com/gmcorenet/gmcore
 
 go 1.21
 

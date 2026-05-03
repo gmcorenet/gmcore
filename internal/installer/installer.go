@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/gmcore/internal/download"
+	"github.com/gmcorenet/gmcore/internal/download"
 )
 
 type Component struct {
