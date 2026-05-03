@@ -12,14 +12,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gmcorenet/cli/internal/bundle"
-	"github.com/gmcorenet/cli/internal/download"
-	"github.com/gmcorenet/cli/internal/installer"
-	"github.com/gmcorenet/cli/internal/manifest"
-	"github.com/gmcorenet/cli/internal/version"
+	"github.com/gmcorenet/gmcore/internal/bundle"
+	"github.com/gmcorenet/gmcore/internal/download"
+	"github.com/gmcorenet/gmcore/internal/installer"
+	"github.com/gmcorenet/gmcore/internal/manifest"
+	"github.com/gmcorenet/gmcore/internal/version"
 )
 
-const cliVersion = "v0.4.0"
+const cliVersion = "v0.5.0"
 const repo = "gmcorenet/gmcore"
 
 var availableCommands = []string{"create", "remove", "list", "status", "version", "self-update", "bundle", "bundles", "bundle-make"}
@@ -1270,44 +1270,21 @@ GMCore bundle for %s functionality.
 
 ## Structure
 
-```
-.
-├── manifest.yaml      # Bundle manifest
-├── cmd/              # Application entry points
-│   └── %[1]s/
-│       └── main.go
-├── internal/         # Internal packages
-│   └── %[1]s/
-│       └── %[1]s.go
-└── services/         # Service definitions
-```
+- manifest.yaml
+- cmd/
+  - %s/
+    - main.go
+- internal/
+  - %s/
+    - %s.go
+- services/
 
 ## Publishing
 
 1. Fork https://github.com/gmcorenet/bundles
-2. Copy this folder to the appropriate tier:
-   - \`official/\` - Officially maintained bundles
-   - \`approved/\` - Community bundles that have been reviewed
-   - \`wild/\` - Unreviewed community bundles
+2. Copy this folder to the appropriate tier
 3. Submit a pull request
-
-## Bundle Manifest
-
-Edit \`manifest.yaml\` to define your bundle:
-
-```yaml
-version: "1.0.0"
-name: "%[1]s"
-released: "2026-05-02"
-repo: YOUR_USERNAME/bundle-%[1]s
-
-components:
-  %[1]s:
-    path: internal/%[1]s
-    version: "1.0.0"
-    verify: true
-```
-`, name, name)
+`, name, name, name, name, name)
 
 	readmePath := filepath.Join(folder, "README.md")
 	if err := os.WriteFile(readmePath, []byte(readme), 0644); err != nil {
