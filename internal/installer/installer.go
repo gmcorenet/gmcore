@@ -20,8 +20,9 @@ type Component struct {
 }
 
 type Installer struct {
-	destPath string
-	verbose  bool
+	destPath          string
+	verbose           bool
+	protectedPatterns []string
 }
 
 func New(destPath string, verbose bool) *Installer {
@@ -29,6 +30,30 @@ func New(destPath string, verbose bool) *Installer {
 		destPath: destPath,
 		verbose:  verbose,
 	}
+}
+
+func NewWithProtection(destPath string, verbose bool, protectedPatterns []string) *Installer {
+	return &Installer{
+		destPath:          destPath,
+		verbose:           verbose,
+		protectedPatterns: protectedPatterns,
+	}
+}
+
+var DefaultProtectedPatterns = []string{
+	".env",
+	".env.local",
+	".env.*",
+	"config/",
+	"var/",
+	"data/",
+	"storage/",
+	"*.yaml",
+	"*.yml",
+	"*.json",
+	"composer.json",
+	"go.mod",
+	"go.sum",
 }
 
 func (i *Installer) InstallComponent(comp Component) error {
@@ -86,6 +111,82 @@ func (i *Installer) InstallComponent(comp Component) error {
 
 	if i.verbose {
 		fmt.Printf("  Installed %s to %s\n", comp.Repo, comp.Path)
+	}
+
+	return nil
+}
+
+func (i *Installer) InstallComponentProtected(comp Component, verbose bool) error {
+	release, err := i.resolveRelease(comp.Release, comp.Repo)
+	if err != nil {
+		return err
+	}
+
+	if verbose {
+		fmt.Printf("Installing protected %s @ %s...\n", comp.Repo, release)
+	}
+
+	owner, name := parseRepo(comp.Repo)
+	tarballURL := fmt.Sprintf(
+		"https://github.com/%s/%s/archive/refs/tags/%s.tar.gz",
+		owner, name, release,
+	)
+
+	if verbose {
+		fmt.Printf("  Downloading from %s\n", tarballURL)
+	}
+
+	tmpDir, err := os.MkdirTemp("", "gmcore-install-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	tarballPath := filepath.Join(tmpDir, "component.tar.gz")
+
+	if err := download.File(tarballURL, tarballPath); err != nil {
+		return fmt.Errorf("failed to download %s: %w", comp.Repo, err)
+	}
+
+	extractPath := filepath.Join(tmpDir, "extracted")
+	if err := extractTarGz(tarballPath, extractPath); err != nil {
+		return fmt.Errorf("failed to extract %s: %w", comp.Repo, err)
+	}
+
+	entries, err := os.ReadDir(extractPath)
+	if err != nil || len(entries) == 0 {
+		return fmt.Errorf("failed to read extracted content for %s", comp.Repo)
+	}
+
+	sourceDir := filepath.Join(extractPath, entries[0].Name())
+	destDir := filepath.Join(i.destPath, comp.Path)
+
+	if err := os.MkdirAll(filepath.Dir(destDir), 0755); err != nil {
+		return fmt.Errorf("failed to create directory for %s: %w", comp.Path, err)
+	}
+
+	skippedFiles := []string{}
+	for _, pattern := range i.protectedPatterns {
+		if verbose {
+			fmt.Printf("  Protected pattern: %s\n", pattern)
+		}
+	}
+
+	if err := copyDirProtected(sourceDir, destDir, i.protectedPatterns, &skippedFiles); err != nil {
+		return fmt.Errorf("failed to copy %s to %s: %w", comp.Repo, comp.Path, err)
+	}
+
+	if verbose && len(skippedFiles) > 0 {
+		fmt.Printf("  Skipped %d protected files:\n", len(skippedFiles))
+		for _, f := range skippedFiles {
+			if len(f) < 50 {
+				fmt.Printf("    - %s\n", f)
+			}
+		}
+	}
+
+	if verbose {
+		fmt.Printf("  Installed %s to %s (with protection)\n", comp.Repo, comp.Path)
 	}
 
 	return nil
@@ -215,6 +316,75 @@ func copyDir(src, dst string) error {
 
 		return copyFile(path, destPath)
 	})
+}
+
+func copyDirProtected(src, dst string, patterns []string, skippedFiles *[]string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		relPath, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+
+		destPath := filepath.Join(dst, relPath)
+
+		if info.IsDir() {
+			if _, err := os.Stat(destPath); os.IsNotExist(err) {
+				return os.MkdirAll(destPath, info.Mode())
+			}
+			return nil
+		}
+
+		if isProtected(relPath, patterns) {
+			if _, err := os.Stat(destPath); err == nil {
+				*skippedFiles = append(*skippedFiles, relPath)
+				return nil
+			}
+		}
+
+		return copyFile(path, destPath)
+	})
+}
+
+func isProtected(relPath string, patterns []string) bool {
+	for _, pattern := range patterns {
+		if matchPattern(relPath, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchPattern(path, pattern string) bool {
+	if pattern == "" {
+		return false
+	}
+
+	if strings.HasSuffix(pattern, "/") {
+		dirPrefix := strings.TrimSuffix(pattern, "/")
+		if strings.HasPrefix(path, dirPrefix) {
+			return true
+		}
+		return false
+	}
+
+	if strings.HasPrefix(pattern, "*.") {
+		ext := strings.TrimPrefix(pattern, "*.")
+		return strings.HasSuffix(path, "."+ext)
+	}
+
+	if strings.Contains(pattern, "*") {
+		parts := strings.Split(pattern, "*")
+		if len(parts) == 2 {
+			return strings.HasPrefix(path, parts[0]) && strings.HasSuffix(path, parts[1])
+		}
+		return false
+	}
+
+	return path == pattern || path == strings.TrimPrefix(pattern, "./")
 }
 
 func copyFile(src, dst string) error {

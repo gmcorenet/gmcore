@@ -382,17 +382,17 @@ func (m *UpdateManager) updateSkeleton() UpdateResult {
 		}
 	}
 
-	inst := installer.New(m.appPath, m.opts.Verbose)
+	inst := installer.NewWithProtection(m.appPath, m.opts.Verbose, installer.DefaultProtectedPatterns)
 	skeletonPath := skeleton.Path
 	if skeletonPath == "" {
 		skeletonPath = "."
 	}
 
-	if err := inst.InstallComponent(installer.Component{
+	if err := inst.InstallComponentProtected(installer.Component{
 		Repo:    skeleton.Repo,
 		Release: skeleton.Release,
 		Path:    skeletonPath,
-	}); err != nil {
+	}, m.opts.Verbose); err != nil {
 		result.Error = err
 		return result
 	}
