@@ -1366,6 +1366,7 @@ func handleUpdate(args []string) {
 			version = strings.TrimPrefix(arg, "--version=")
 		} else if strings.HasPrefix(arg, "--app=") {
 			appPath = strings.TrimPrefix(arg, "--app=")
+			appPath = filepath.Join(getBasePath(), "gmcore-"+appPath)
 		} else if strings.HasPrefix(arg, "--rollback") {
 			rollback = true
 		} else if strings.HasPrefix(arg, "--verbose") || arg == "-v" {
@@ -1377,7 +1378,7 @@ func handleUpdate(args []string) {
 			printUpdateUsage()
 			os.Exit(0)
 		} else if !strings.HasPrefix(arg, "--") && appPath == "" {
-			appPath = arg
+			appPath = filepath.Join(getBasePath(), "gmcore-"+arg)
 		}
 	}
 
@@ -1407,7 +1408,7 @@ func printUpdateUsage() {
 	fmt.Println("Flags:")
 	fmt.Println("  --target=<target>    Target to update: framework, sdks, skeleton, app, all (default: all)")
 	fmt.Println("  --version=<version> Version to install (default: latest)")
-	fmt.Println("  --app=<path>        Application path (optional if run from app directory)")
+	fmt.Println("  --app=<name>       Application name (optional if run from app directory)")
 	fmt.Println("  --sdk=<name>        Specific SDK to update (can be used multiple times)")
 	fmt.Println("  --rollback         Rollback on failure (saves backup to /var/gmcore-<app>/backups/)")
 	fmt.Println("  --verbose, -v       Verbose output")
