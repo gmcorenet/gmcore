@@ -3,7 +3,9 @@ package installer
 import (
 	"archive/tar"
 	"bufio"
+	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,7 +14,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/gmcorenet/gmcore/internal/download"
+	"gopkg.in/yaml.v3"
 )
 
 type Component struct {
@@ -45,6 +47,13 @@ func NewWithProtection(destPath string, verbose bool, protectedPatterns []string
 		destPath:          destPath,
 		verbose:           verbose,
 		protectedPatterns: protectedPatterns,
+	}
+}
+
+func NewWithVars(destPath string, verbose bool) *Installer {
+	return &Installer{
+		destPath: destPath,
+		verbose:  verbose,
 	}
 }
 
@@ -122,6 +131,208 @@ func (i *Installer) InstallComponent(comp Component) error {
 	}
 
 	return nil
+}
+
+func (i *Installer) InstallComponentWithVars(comp Component, vars map[string]string) error {
+	release, err := i.resolveRelease(comp.Release, comp.Repo)
+	if err != nil {
+		return err
+	}
+
+	if i.verbose {
+		fmt.Printf("Installing %s @ %s with variable substitution...\n", comp.Repo, release)
+	}
+
+	owner, name := parseRepo(comp.Repo)
+	tarballURL := fmt.Sprintf(
+		"https://github.com/%s/%s/archive/refs/tags/%s.tar.gz",
+		owner, name, release,
+	)
+
+	if i.verbose {
+		fmt.Printf("  Downloading from %s\n", tarballURL)
+	}
+
+	tmpDir, err := os.MkdirTemp("", "gmcore-install-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	tarballPath := filepath.Join(tmpDir, "component.tar.gz")
+
+	if err := download.File(tarballURL, tarballPath); err != nil {
+		return fmt.Errorf("failed to download %s: %w", comp.Repo, err)
+	}
+
+	extractPath := filepath.Join(tmpDir, "extracted")
+	if err := extractTarGz(tarballPath, extractPath); err != nil {
+		return fmt.Errorf("failed to extract %s: %w", comp.Repo, err)
+	}
+
+	entries, err := os.ReadDir(extractPath)
+	if err != nil || len(entries) == 0 {
+		return fmt.Errorf("failed to read extracted content for %s", comp.Repo)
+	}
+
+	sourceDir := filepath.Join(extractPath, entries[0].Name())
+	destDir := filepath.Join(i.destPath, comp.Path)
+
+	if err := os.MkdirAll(filepath.Dir(destDir), 0755); err != nil {
+		return fmt.Errorf("failed to create directory for %s: %w", comp.Path, err)
+	}
+
+	if err := copyDirWithVars(sourceDir, destDir, vars); err != nil {
+		return fmt.Errorf("failed to copy %s to %s: %w", comp.Repo, comp.Path, err)
+	}
+
+	if i.verbose {
+		fmt.Printf("  Installed %s to %s with vars\n", comp.Repo, comp.Path)
+	}
+
+	return nil
+}
+
+func copyDirWithVars(src, dst string, vars map[string]string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		relPath, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+
+		destPath := filepath.Join(dst, relPath)
+
+		if info.IsDir() {
+			return os.MkdirAll(destPath, info.Mode())
+		}
+
+		return copyFileWithVars(path, destPath, vars)
+	})
+}
+
+func copyFileWithVars(src, dst string, vars map[string]string) error {
+	content, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+
+	processed := substituteVars(string(content), vars)
+
+	ext := strings.ToLower(filepath.Ext(src))
+	if ext == ".yaml" || ext == ".yml" || ext == ".json" {
+		processed, err = processConfigWithVars(string(content), ext, vars)
+		if err != nil {
+			processed = substituteVars(string(content), vars)
+		}
+	}
+
+	return os.WriteFile(dst, []byte(processed), 0644)
+}
+
+func substituteVars(content string, vars map[string]string) string {
+	result := content
+	for key, value := range vars {
+		placeholder := fmt.Sprintf("{{%s}}", key)
+		result = strings.ReplaceAll(result, placeholder, value)
+	}
+	return result
+}
+
+func processConfigWithVars(content, ext string, vars map[string]string) (string, error) {
+	switch ext {
+	case ".yaml", ".yml":
+		return processYamlWithVars(content, vars)
+	case ".json":
+		return processJsonWithVars(content, vars)
+	default:
+		return substituteVars(content, vars), nil
+	}
+}
+
+func processYamlWithVars(content string, vars map[string]string) (string, error) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(content), &doc); err != nil {
+		return "", err
+	}
+
+	substituteYamlNode(&doc, vars)
+
+	output, err := yaml.Marshal(&doc)
+	if err != nil {
+		return "", err
+	}
+
+	return string(output), nil
+}
+
+func substituteYamlNode(node *yaml.Node, vars map[string]string) {
+	if node == nil {
+		return
+	}
+
+	switch node.Kind {
+	case yaml.ScalarNode:
+		node.Value = substituteVars(node.Value, vars)
+	case yaml.MappingNode:
+		for i := 0; i < len(node.Content); i += 2 {
+			keyNode := node.Content[i]
+			valNode := node.Content[i+1]
+			keyNode.Value = substituteVars(keyNode.Value, vars)
+			substituteYamlNode(valNode, vars)
+		}
+	case yaml.SequenceNode:
+		for _, child := range node.Content {
+			substituteYamlNode(child, vars)
+		}
+	case yaml.DocumentNode:
+		for _, child := range node.Content {
+			substituteYamlNode(child, vars)
+		}
+	}
+}
+
+func processJsonWithVars(content string, vars map[string]string) (string, error) {
+	var doc interface{}
+	if err := json.Unmarshal([]byte(content), &doc); err != nil {
+		return "", err
+	}
+
+	doc = substituteJsonNode(doc, vars)
+
+	output, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	return string(output), nil
+}
+
+func substituteJsonNode(node interface{}, vars map[string]string) interface{} {
+	switch n := node.(type) {
+	case map[string]interface{}:
+		for key, value := range n {
+			newKey := substituteVars(key, vars)
+			if newKey != key {
+				delete(n, key)
+				n[newKey] = value
+			}
+			n[newKey] = substituteJsonNode(value, vars)
+		}
+		return n
+	case []interface{}:
+		for i, item := range n {
+			n[i] = substituteJsonNode(item, vars)
+		}
+		return n
+	case string:
+		return substituteVars(n, vars)
+	default:
+		return n
+	}
 }
 
 func (i *Installer) InstallComponentProtected(comp Component, verbose bool) error {
@@ -817,4 +1028,29 @@ func copyFile(src, dst string) error {
 
 	_, err = io.Copy(dstFile, srcFile)
 	return err
+}
+
+func BuildAppVars(appName string, goVersion string) map[string]string {
+	vars := map[string]string{
+		"APP_NAME":       appName,
+		"APP_NAME_CAMEL": toCamelCase(appName),
+		"APP_NAME_LOWER": strings.ToLower(appName),
+		"APP_NAME_UPPER": strings.ToUpper(appName),
+		"GO_VERSION":     goVersion,
+	}
+
+	return vars
+}
+
+func toCamelCase(s string) string {
+	words := strings.Fields(s)
+	for i, word := range words {
+		if i == 0 {
+			words[i] = strings.ToLower(word)
+		} else {
+			words[i] = strings.Title(strings.ToLower(word))
+		}
+	}
+	result := strings.Join(words, "")
+	return strings.Title(strings.ToLower(result))
 }

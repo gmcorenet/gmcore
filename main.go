@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -567,7 +568,8 @@ func createApp(appName, manifestVersion string) error {
 	fmt.Printf("Manifest: %s (version %s)\n", m.Name, m.Version)
 	fmt.Println("")
 
-	inst := installer.New(appPath, true)
+	inst := installer.NewWithVars(appPath, true)
+	instWithVars := installer.NewWithVars(appPath, true)
 
 	fmt.Println("Installing framework...")
 	framework := m.GetFramework()
@@ -579,14 +581,15 @@ func createApp(appName, manifestVersion string) error {
 		return fmt.Errorf("failed to install framework: %w", err)
 	}
 
+	appVars := installer.BuildAppVars(appName, getGoVersion())
 	fmt.Println("")
-	fmt.Println("Installing skeleton...")
+	fmt.Println("Installing skeleton with variable substitution...")
 	skeleton := m.GetSkeleton()
-	if err := inst.InstallComponent(installer.Component{
+	if err := instWithVars.InstallComponentWithVars(installer.Component{
 		Repo:    skeleton.Repo,
 		Release: skeleton.Release,
 		Path:    ".",
-	}); err != nil {
+	}, appVars); err != nil {
 		return fmt.Errorf("failed to install skeleton: %w", err)
 	}
 
@@ -1104,6 +1107,21 @@ func getBasePath() string {
 	default:
 		return "/opt/gmcore"
 	}
+}
+
+func getGoVersion() string {
+	cmd := exec.Command("go", "version")
+	output, err := cmd.Output()
+	if err != nil {
+		return "1.21"
+	}
+	version := string(output)
+	re := regexp.MustCompile(`go(\d+\.\d+)`)
+	matches := re.FindStringSubmatch(version)
+	if len(matches) >= 2 {
+		return matches[1]
+	}
+	return "1.21"
 }
 
 func requireRoot() error {
