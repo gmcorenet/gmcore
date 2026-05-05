@@ -5,14 +5,14 @@ import (
 	"compress/gzip"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
-	"gopkg.in/yaml.v3"
+	"github.com/gmcorenet/gmcore/internal/installer"
+	"github.com/gmcorenet/gmcore/internal/manifest"
 )
 
 type UpdateTarget string
@@ -21,18 +21,17 @@ const (
 	TargetFramework UpdateTarget = "framework"
 	TargetSDKs     UpdateTarget = "sdks"
 	TargetSkeleton UpdateTarget = "skeleton"
-	TargetApp      UpdateTarget = "app"
-	TargetAll      UpdateTarget = "all"
+	TargetApp     UpdateTarget = "app"
+	TargetAll     UpdateTarget = "all"
 )
 
 type UpdateOptions struct {
-	Target     UpdateTarget
-	Version    string
-	SDKs       []string
-	AppName    string
-	Rollback   bool
-	Verbose    bool
-	SkipVerify bool
+	Target   UpdateTarget
+	Version  string
+	SDKs     []string
+	AppName  string
+	Rollback bool
+	Verbose  bool
 }
 
 type UpdateResult struct {
@@ -50,26 +49,8 @@ type UpdateManager struct {
 	results  []UpdateResult
 	basePath string
 	appPath  string
-	manifest *AppManifest
-}
-
-type AppManifest struct {
-	Version   string                 `yaml:"version"`
-	Name      string                 `yaml:"name"`
-	Framework ManifestComponent      `yaml:"framework"`
-	SDKs      []ManifestSDKComponent `yaml:"sdks"`
-	Skeleton  ManifestComponent      `yaml:"skeleton"`
-}
-
-type ManifestComponent struct {
-	Repo    string `yaml:"repo"`
-	Release string `yaml:"release"`
-	Path    string `yaml:"path"`
-}
-
-type ManifestSDKComponent struct {
-	Name    string `yaml:"name"`
-	Release string `yaml:"release"`
+	appName  string
+	mf       *manifest.Manifest
 }
 
 func NewUpdateManager(opts *UpdateOptions) *UpdateManager {
@@ -81,11 +62,12 @@ func NewUpdateManager(opts *UpdateOptions) *UpdateManager {
 
 	if opts.AppName != "" {
 		m.appPath = filepath.Join(m.basePath, "gmcore-"+opts.AppName)
+		m.appName = opts.AppName
 	} else if detected := detectAppRoot(); detected != "" {
 		m.appPath = detected
 		parts := strings.Split(filepath.Base(detected), "-")
 		if len(parts) >= 2 && parts[0] == "gmcore" {
-			m.opts.AppName = strings.Join(parts[1:], "-")
+			m.appName = strings.Join(parts[1:], "-")
 		}
 	}
 
@@ -141,18 +123,18 @@ func (m *UpdateManager) Run() error {
 	}
 
 	if _, err := os.Stat(m.appPath); os.IsNotExist(err) {
-		return fmt.Errorf("app not found: %s", m.opts.AppName)
+		return fmt.Errorf("app not found: %s", m.appName)
 	}
 
-	manifest, err := m.fetchManifest(m.opts.Version)
+	mf, err := manifest.Fetch("gmcorenet", "manifest", m.opts.Version)
 	if err != nil {
 		return fmt.Errorf("failed to fetch manifest: %w", err)
 	}
-	m.manifest = manifest
+	m.mf = mf
 
 	if m.opts.Verbose {
-		fmt.Printf("App: %s\n", m.opts.AppName)
-		fmt.Printf("Manifest version: %s\n", manifest.Version)
+		fmt.Printf("App: %s\n", m.appName)
+		fmt.Printf("Manifest version: %s\n", mf.Version)
 		fmt.Printf("Update targets: %v\n", m.resolveTargets())
 		fmt.Printf("Rollback on failure: %v\n", m.opts.Rollback)
 		fmt.Println("")
@@ -185,52 +167,6 @@ func (m *UpdateManager) Run() error {
 	return m.printSummary()
 }
 
-func (m *UpdateManager) fetchManifest(version string) (*AppManifest, error) {
-	if version == "" || version == "latest" {
-		version = "main"
-	}
-
-	url := fmt.Sprintf("https://raw.githubusercontent.com/gmcorenet/manifest/%s/app/v1.0.yaml", version)
-
-	if m.opts.Verbose {
-		fmt.Printf("Fetching manifest from: %s\n", url)
-	}
-
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch manifest: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == 404 {
-		return nil, fmt.Errorf("manifest not found for version: %s", version)
-	}
-
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("failed to fetch manifest: HTTP %d", resp.StatusCode)
-	}
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read manifest: %w", err)
-	}
-
-	return parseManifest(data)
-}
-
-func parseManifest(data []byte) (*AppManifest, error) {
-	var manifest AppManifest
-	if err := yaml.Unmarshal(data, &manifest); err != nil {
-		return nil, fmt.Errorf("failed to parse manifest: %w", err)
-	}
-
-	if manifest.Version == "" {
-		manifest.Version = "1.0"
-	}
-
-	return &manifest, nil
-}
-
 func (m *UpdateManager) resolveTargets() []UpdateTarget {
 	switch m.opts.Target {
 	case TargetAll:
@@ -261,7 +197,7 @@ func (m *UpdateManager) updateTarget(target UpdateTarget) UpdateResult {
 }
 
 func (m *UpdateManager) getBackupDir() string {
-	varDir := filepath.Join("/var", "gmcore-"+m.opts.AppName, "backups")
+	varDir := filepath.Join("/var", "gmcore-"+m.appName, "backups")
 	os.MkdirAll(varDir, 0755)
 	return varDir
 }
@@ -275,16 +211,15 @@ func (m *UpdateManager) createBackup(target UpdateTarget, version string) (strin
 	var sourcePath string
 	switch target {
 	case TargetFramework:
-		sourcePath = filepath.Join(m.appPath, m.manifest.Framework.Path)
-		if sourcePath == "" {
-			sourcePath = filepath.Join(m.appPath, "vendor", "framework")
-		}
+		sourcePath = filepath.Join(m.appPath, m.mf.Framework.Path)
 	case TargetSDKs:
 		sourcePath = filepath.Join(m.appPath, "vendor", "sdks")
 	case TargetSkeleton:
-		sourcePath = filepath.Join(m.appPath, m.manifest.Skeleton.Path)
-		if sourcePath == "" || sourcePath == "." {
+		skeletonPath := m.mf.Skeleton.Path
+		if skeletonPath == "" || skeletonPath == "." {
 			sourcePath = m.appPath
+		} else {
+			sourcePath = filepath.Join(m.appPath, skeletonPath)
 		}
 	case TargetApp:
 		sourcePath = m.appPath
@@ -306,20 +241,11 @@ func (m *UpdateManager) createBackup(target UpdateTarget, version string) (strin
 func (m *UpdateManager) updateFramework() UpdateResult {
 	result := UpdateResult{Target: TargetFramework}
 
-	component := m.manifest.Framework
-	version := m.resolveVersion(component.Release)
-
+	framework := m.mf.GetFramework()
 	currentVersion := m.getCurrentVersion()
-	result.From = currentVersion
-	result.To = version
 
 	if m.opts.Verbose {
-		fmt.Printf("  Framework: %s -> %s (repo: %s)\n", currentVersion, version, component.Repo)
-	}
-
-	destPath := filepath.Join(m.appPath, component.Path)
-	if destPath == "" || destPath == "." {
-		destPath = filepath.Join(m.appPath, "vendor", "framework")
+		fmt.Printf("  Framework: %s -> %s (repo: %s)\n", currentVersion, framework.Release, framework.Repo)
 	}
 
 	if m.opts.Rollback {
@@ -334,13 +260,20 @@ func (m *UpdateManager) updateFramework() UpdateResult {
 		}
 	}
 
-	if err := m.downloadAndExtract(component.Repo, version, destPath); err != nil {
+	inst := installer.New(m.appPath, m.opts.Verbose)
+	if err := inst.InstallComponent(installer.Component{
+		Repo:    framework.Repo,
+		Release: framework.Release,
+		Path:    framework.Path,
+	}); err != nil {
 		result.Error = err
 		return result
 	}
 
+	result.From = currentVersion
+	result.To = framework.Release
 	result.Success = true
-	fmt.Printf("Framework updated: %s -> %s\n", currentVersion, version)
+	fmt.Printf("Framework updated: %s -> %s\n", currentVersion, framework.Release)
 	if result.BackupPath != "" {
 		fmt.Printf("  Backup: %s\n", result.BackupPath)
 	}
@@ -352,21 +285,20 @@ func (m *UpdateManager) updateSDKs() UpdateResult {
 
 	sdksToUpdate := m.opts.SDKs
 	if len(sdksToUpdate) == 0 {
-		for _, sdk := range m.manifest.SDKs {
+		for _, sdk := range m.mf.GetSDKs() {
 			sdksToUpdate = append(sdksToUpdate, sdk.Name)
 		}
 	}
 
-	var baseVersion string
-	if len(m.manifest.SDKs) > 0 {
-		baseVersion = m.manifest.SDKs[0].Release
-	}
-	version := m.resolveVersion(baseVersion)
 	result.From = "previous"
-	result.To = version
+	if len(m.mf.GetSDKs()) > 0 {
+		result.To = m.mf.GetSDKs()[0].Release
+	} else {
+		result.To = "unknown"
+	}
 
 	if m.opts.Verbose {
-		fmt.Printf("  SDKs base version: %s\n", version)
+		fmt.Printf("  SDKs base version: %s\n", result.To)
 	}
 
 	if m.opts.Rollback {
@@ -381,11 +313,13 @@ func (m *UpdateManager) updateSDKs() UpdateResult {
 		}
 	}
 
+	inst := installer.New(m.appPath, m.opts.Verbose)
 	successCount := 0
+
 	for _, sdkName := range sdksToUpdate {
 		var sdkRelease string
 
-		for _, sdk := range m.manifest.SDKs {
+		for _, sdk := range m.mf.GetSDKs() {
 			if sdk.Name == sdkName {
 				sdkRelease = sdk.Release
 				break
@@ -393,17 +327,20 @@ func (m *UpdateManager) updateSDKs() UpdateResult {
 		}
 
 		if sdkRelease == "" {
-			sdkRelease = baseVersion
+			sdkRelease = result.To
 		}
 
-		sdkVersion := m.resolveVersion(sdkRelease)
+		sdkPath := "vendor/sdks/" + sdkName
 
-		sdkFullPath := filepath.Join(m.appPath, "vendor", "sdks", sdkName)
 		if m.opts.Verbose {
-			fmt.Printf("  Updating SDK: %s @ %s\n", sdkName, sdkVersion)
+			fmt.Printf("  Updating SDK: %s @ %s\n", sdkName, sdkRelease)
 		}
 
-		if err := m.downloadAndExtract("gmcorenet/sdk", sdkVersion, sdkFullPath); err != nil {
+		if err := inst.InstallComponent(installer.Component{
+			Repo:    "gmcorenet/" + sdkName,
+			Release: sdkRelease,
+			Path:    sdkPath,
+		}); err != nil {
 			fmt.Printf("  Warning: failed to update %s: %v\n", sdkName, err)
 			continue
 		}
@@ -416,7 +353,7 @@ func (m *UpdateManager) updateSDKs() UpdateResult {
 	}
 
 	result.Success = true
-	fmt.Printf("SDKs updated (%d/%d): %s\n", successCount, len(sdksToUpdate), version)
+	fmt.Printf("SDKs updated (%d/%d)\n", successCount, len(sdksToUpdate))
 	if result.BackupPath != "" {
 		fmt.Printf("  Backup: %s\n", result.BackupPath)
 	}
@@ -426,20 +363,11 @@ func (m *UpdateManager) updateSDKs() UpdateResult {
 func (m *UpdateManager) updateSkeleton() UpdateResult {
 	result := UpdateResult{Target: TargetSkeleton}
 
-	component := m.manifest.Skeleton
-	version := m.resolveVersion(component.Release)
-
+	skeleton := m.mf.GetSkeleton()
 	currentVersion := m.getCurrentVersion()
-	result.From = currentVersion
-	result.To = version
 
 	if m.opts.Verbose {
-		fmt.Printf("  Skeleton: %s -> %s (repo: %s)\n", currentVersion, version, component.Repo)
-	}
-
-	destPath := filepath.Join(m.appPath, component.Path)
-	if destPath == "" || destPath == "." {
-		destPath = m.appPath
+		fmt.Printf("  Skeleton: %s -> %s (repo: %s)\n", currentVersion, skeleton.Release, skeleton.Repo)
 	}
 
 	if m.opts.Rollback {
@@ -454,13 +382,25 @@ func (m *UpdateManager) updateSkeleton() UpdateResult {
 		}
 	}
 
-	if err := m.downloadAndExtract(component.Repo, version, destPath); err != nil {
+	inst := installer.New(m.appPath, m.opts.Verbose)
+	skeletonPath := skeleton.Path
+	if skeletonPath == "" {
+		skeletonPath = "."
+	}
+
+	if err := inst.InstallComponent(installer.Component{
+		Repo:    skeleton.Repo,
+		Release: skeleton.Release,
+		Path:    skeletonPath,
+	}); err != nil {
 		result.Error = err
 		return result
 	}
 
+	result.From = currentVersion
+	result.To = skeleton.Release
 	result.Success = true
-	fmt.Printf("Skeleton updated: %s -> %s\n", currentVersion, version)
+	fmt.Printf("Skeleton updated: %s -> %s\n", currentVersion, skeleton.Release)
 	if result.BackupPath != "" {
 		fmt.Printf("  Backup: %s\n", result.BackupPath)
 	}
@@ -476,24 +416,10 @@ func (m *UpdateManager) updateApp() UpdateResult {
 	}
 
 	result.From = "current"
-	result.To = m.manifest.Version
-
-	fmt.Printf("App manifest version: %s\n", m.manifest.Version)
-
+	result.To = "latest"
 	result.Success = true
+	fmt.Printf("App up to date\n")
 	return result
-}
-
-func (m *UpdateManager) resolveVersion(release string) string {
-	if release == "" || release == "latest" {
-		return "main"
-	}
-
-	if strings.HasPrefix(release, "v") || strings.HasPrefix(release, "1.") {
-		return release
-	}
-
-	return "v" + release
 }
 
 func (m *UpdateManager) getCurrentVersion() string {
@@ -502,55 +428,6 @@ func (m *UpdateManager) getCurrentVersion() string {
 		return strings.TrimSpace(string(data))
 	}
 	return "unknown"
-}
-
-func (m *UpdateManager) downloadAndExtract(repo, version, destPath string) error {
-	tarballURL := fmt.Sprintf(
-		"https://github.com/%s/archive/refs/tags/%s.tar.gz",
-		repo, version,
-	)
-
-	tmpDir, err := os.MkdirTemp("", "gmcore-update-*")
-	if err != nil {
-		return fmt.Errorf("failed to create temp directory: %w", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	tarballPath := filepath.Join(tmpDir, "component.tar.gz")
-
-	if m.opts.Verbose {
-		fmt.Printf("  Downloading from %s\n", tarballURL)
-	}
-
-	if err := downloadFile(tarballURL, tarballPath); err != nil {
-		return fmt.Errorf("failed to download: %w", err)
-	}
-
-	extractPath := filepath.Join(tmpDir, "extracted")
-	if err := extractTarGz(tarballPath, extractPath); err != nil {
-		return fmt.Errorf("failed to extract: %w", err)
-	}
-
-	entries, err := os.ReadDir(extractPath)
-	if err != nil || len(entries) == 0 {
-		return fmt.Errorf("failed to read extracted content")
-	}
-
-	sourceDir := filepath.Join(extractPath, entries[0].Name())
-
-	if err := os.RemoveAll(destPath); err != nil {
-		fmt.Printf("  Warning: failed to remove old version: %v\n", err)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	if err := copyDir(sourceDir, destPath); err != nil {
-		return fmt.Errorf("failed to copy: %w", err)
-	}
-
-	return nil
 }
 
 func (m *UpdateManager) rollback(target UpdateTarget) error {
@@ -562,16 +439,15 @@ func (m *UpdateManager) rollback(target UpdateTarget) error {
 			var restorePath string
 			switch target {
 			case TargetFramework:
-				restorePath = filepath.Join(m.appPath, m.manifest.Framework.Path)
-				if restorePath == "" {
-					restorePath = filepath.Join(m.appPath, "vendor", "framework")
-				}
+				restorePath = filepath.Join(m.appPath, m.mf.Framework.Path)
 			case TargetSDKs:
 				restorePath = filepath.Join(m.appPath, "vendor", "sdks")
 			case TargetSkeleton:
-				restorePath = filepath.Join(m.appPath, m.manifest.Skeleton.Path)
-				if restorePath == "" || restorePath == "." {
+				skeletonPath := m.mf.Skeleton.Path
+				if skeletonPath == "" || skeletonPath == "." {
 					restorePath = m.appPath
+				} else {
+					restorePath = filepath.Join(m.appPath, skeletonPath)
 				}
 			default:
 				return fmt.Errorf("unknown target for rollback: %s", target)
@@ -651,25 +527,52 @@ func getBasePath() string {
 	}
 }
 
-func downloadFile(url, destPath string) error {
-	resp, err := http.Get(url)
+func createTarGz(sourcePath, destPath string) error {
+	file, err := os.Create(destPath)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer file.Close()
 
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
+	gzw := gzip.NewWriter(file)
+	defer gzw.Close()
 
-	outFile, err := os.Create(destPath)
-	if err != nil {
+	tw := tar.NewWriter(gzw)
+	defer tw.Close()
+
+	return filepath.Walk(sourcePath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		relPath, err := filepath.Rel(filepath.Dir(sourcePath), path)
+		if err != nil {
+			return err
+		}
+
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		header.Name = relPath
+
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+
+		if info.IsDir() {
+			return nil
+		}
+
+		srcFile, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer srcFile.Close()
+
+		_, err = io.Copy(tw, srcFile)
 		return err
-	}
-	defer outFile.Close()
-
-	_, err = io.Copy(outFile, resp.Body)
-	return err
+	})
 }
 
 func extractTarGz(tarballPath, destPath string) error {
@@ -722,54 +625,6 @@ func extractTarGz(tarballPath, destPath string) error {
 	return nil
 }
 
-func createTarGz(sourcePath, destPath string) error {
-	file, err := os.Create(destPath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	gzw := gzip.NewWriter(file)
-	defer gzw.Close()
-
-	tw := tar.NewWriter(gzw)
-	defer tw.Close()
-
-	return filepath.Walk(sourcePath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		relPath, err := filepath.Rel(filepath.Dir(sourcePath), path)
-		if err != nil {
-			return err
-		}
-
-		header, err := tar.FileInfoHeader(info, "")
-		if err != nil {
-			return err
-		}
-		header.Name = relPath
-
-		if err := tw.WriteHeader(header); err != nil {
-			return err
-		}
-
-		if info.IsDir() {
-			return nil
-		}
-
-		srcFile, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer srcFile.Close()
-
-		_, err = io.Copy(tw, srcFile)
-		return err
-	})
-}
-
 func copyDir(src, dst string) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -787,23 +642,19 @@ func copyDir(src, dst string) error {
 			return os.MkdirAll(destPath, info.Mode())
 		}
 
-		return copyFile(path, destPath)
+		srcFile, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer srcFile.Close()
+
+		dstFile, err := os.Create(destPath)
+		if err != nil {
+			return err
+		}
+		defer dstFile.Close()
+
+		_, err = io.Copy(dstFile, srcFile)
+		return err
 	})
-}
-
-func copyFile(src, dst string) error {
-	srcFile, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer srcFile.Close()
-
-	dstFile, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer dstFile.Close()
-
-	_, err = io.Copy(dstFile, srcFile)
-	return err
 }
