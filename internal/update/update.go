@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"time"
 )
 
 type UpdateTarget string
@@ -32,37 +34,93 @@ type UpdateOptions struct {
 }
 
 type UpdateResult struct {
-	Target   UpdateTarget
-	From     string
-	To       string
-	Success  bool
-	Error    error
-	Rollback bool
+	Target     UpdateTarget
+	From       string
+	To         string
+	Success    bool
+	Error      error
+	Rollback   bool
+	BackupPath string
 }
 
 type UpdateManager struct {
 	opts     *UpdateOptions
 	results  []UpdateResult
 	basePath string
+	appPath  string
 }
 
 func NewUpdateManager(opts *UpdateOptions) *UpdateManager {
-	return &UpdateManager{
+	m := &UpdateManager{
 		opts:     opts,
 		results:  make([]UpdateResult, 0),
 		basePath: getBasePath(),
 	}
+
+	if opts.AppPath != "" {
+		m.appPath = opts.AppPath
+	} else if detected := detectAppRoot(); detected != "" {
+		m.appPath = detected
+	} else {
+		m.appPath = ""
+	}
+
+	return m
+}
+
+func detectAppRoot() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+
+	basePath := getBasePath()
+	cwdNormalized := filepath.ToSlash(cwd)
+	basePathNormalized := filepath.ToSlash(basePath)
+
+	if !strings.HasPrefix(cwdNormalized, basePathNormalized) {
+		return ""
+	}
+
+	relative := strings.TrimPrefix(cwdNormalized, basePathNormalized)
+	relative = strings.TrimPrefix(relative, "/")
+
+	if relative == "" || relative == "." {
+		return ""
+	}
+
+	if strings.Contains(relative, "..") {
+		return ""
+	}
+
+	parts := strings.SplitN(relative, "/", 2)
+	if len(parts) < 1 || parts[0] == "" {
+		return ""
+	}
+
+	appName := parts[0]
+	appRoot := filepath.Join(basePath, appName)
+	if _, err := os.Stat(appRoot); err != nil {
+		return ""
+	}
+
+	return appRoot
 }
 
 func (m *UpdateManager) Run() error {
-	targets := m.resolveTargets()
+	if m.appPath == "" {
+		return fmt.Errorf("app path is required. Run from an app directory or use --app=<path>")
+	}
 
 	if m.opts.Verbose {
-		fmt.Printf("Update targets: %v\n", targets)
+		fmt.Printf("App: %s\n", m.appPath)
+		fmt.Printf("Update targets: %v\n", m.resolveTargets())
 		fmt.Printf("Version: %s\n", m.opts.Version)
 		fmt.Printf("Rollback on failure: %v\n", m.opts.Rollback)
 		fmt.Println("")
 	}
+
+	targets := m.resolveTargets()
 
 	for i, target := range targets {
 		if m.opts.Verbose {
@@ -118,6 +176,50 @@ func (m *UpdateManager) updateTarget(target UpdateTarget) UpdateResult {
 	}
 }
 
+func (m *UpdateManager) getBackupDir() string {
+	appName := filepath.Base(m.appPath)
+	varDir := filepath.Join("/var", "gmcore-"+appName, "backups")
+	os.MkdirAll(varDir, 0755)
+	return varDir
+}
+
+func (m *UpdateManager) createBackup(target UpdateTarget, version string) (string, error) {
+	backupDir := m.getBackupDir()
+	timestamp := time.Now().Format("20060102-150405")
+	backupName := fmt.Sprintf("%s_%s_%s.tar.gz", target, version, timestamp)
+	backupPath := filepath.Join(backupDir, backupName)
+
+	var sourcePath string
+	switch target {
+	case TargetFramework:
+		sourcePath = filepath.Join(m.appPath, "vendor", "framework")
+		if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
+			sourcePath = filepath.Join(m.appPath, "packages", "framework")
+		}
+	case TargetSDKs:
+		sourcePath = filepath.Join(m.appPath, "vendor", "sdks")
+		if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
+			sourcePath = filepath.Join(m.appPath, "packages", "sdks")
+		}
+	case TargetSkeleton:
+		sourcePath = m.appPath
+	case TargetApp:
+		sourcePath = m.appPath
+	default:
+		return "", fmt.Errorf("unknown target for backup: %s", target)
+	}
+
+	if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
+		return "", nil
+	}
+
+	if err := createTarGz(sourcePath, backupPath); err != nil {
+		return "", fmt.Errorf("failed to create backup: %w", err)
+	}
+
+	return backupPath, nil
+}
+
 func (m *UpdateManager) updateFramework() UpdateResult {
 	result := UpdateResult{Target: TargetFramework}
 
@@ -135,9 +237,21 @@ func (m *UpdateManager) updateFramework() UpdateResult {
 		fmt.Printf("  Framework: %s -> %s\n", currentVersion, version)
 	}
 
-	frameworkPath := filepath.Join(m.basePath, m.opts.AppPath, "vendor", "framework")
+	frameworkPath := filepath.Join(m.appPath, "vendor", "framework")
 	if _, err := os.Stat(frameworkPath); os.IsNotExist(err) {
-		frameworkPath = filepath.Join(m.basePath, m.opts.AppPath, "packages", "framework")
+		frameworkPath = filepath.Join(m.appPath, "packages", "framework")
+	}
+
+	if m.opts.Rollback {
+		backupPath, err := m.createBackup(TargetFramework, currentVersion)
+		if err != nil {
+			fmt.Printf("  Warning: failed to create backup: %v\n", err)
+		} else {
+			result.BackupPath = backupPath
+			if m.opts.Verbose {
+				fmt.Printf("  Backup created: %s\n", backupPath)
+			}
+		}
 	}
 
 	if err := m.downloadAndExtract("gmcorenet/framework", version, frameworkPath); err != nil {
@@ -147,6 +261,9 @@ func (m *UpdateManager) updateFramework() UpdateResult {
 
 	result.Success = true
 	fmt.Printf("Framework updated: %s -> %s\n", currentVersion, version)
+	if result.BackupPath != "" {
+		fmt.Printf("  Backup: %s\n", result.BackupPath)
+	}
 	return result
 }
 
@@ -166,9 +283,21 @@ func (m *UpdateManager) updateSDKs() UpdateResult {
 	result.From = "previous"
 	result.To = version
 
-	sdkPath := filepath.Join(m.basePath, m.opts.AppPath, "vendor", "sdks")
+	sdkPath := filepath.Join(m.appPath, "vendor", "sdks")
 	if _, err := os.Stat(sdkPath); os.IsNotExist(err) {
-		sdkPath = filepath.Join(m.basePath, m.opts.AppPath, "packages", "sdks")
+		sdkPath = filepath.Join(m.appPath, "packages", "sdks")
+	}
+
+	if m.opts.Rollback {
+		backupPath, err := m.createBackup(TargetSDKs, "previous")
+		if err != nil {
+			fmt.Printf("  Warning: failed to create backup: %v\n", err)
+		} else {
+			result.BackupPath = backupPath
+			if m.opts.Verbose {
+				fmt.Printf("  Backup created: %s\n", backupPath)
+			}
+		}
 	}
 
 	successCount := 0
@@ -192,6 +321,9 @@ func (m *UpdateManager) updateSDKs() UpdateResult {
 
 	result.Success = true
 	fmt.Printf("SDKs updated (%d/%d): %s\n", successCount, len(m.opts.SDKs), version)
+	if result.BackupPath != "" {
+		fmt.Printf("  Backup: %s\n", result.BackupPath)
+	}
 	return result
 }
 
@@ -212,23 +344,36 @@ func (m *UpdateManager) updateSkeleton() UpdateResult {
 		fmt.Printf("  Skeleton: %s -> %s\n", currentVersion, version)
 	}
 
-	skeletonPath := filepath.Join(m.basePath, m.opts.AppPath)
-	if err := m.downloadAndExtract("gmcorenet/skeleton", version, skeletonPath); err != nil {
+	if m.opts.Rollback {
+		backupPath, err := m.createBackup(TargetSkeleton, currentVersion)
+		if err != nil {
+			fmt.Printf("  Warning: failed to create backup: %v\n", err)
+		} else {
+			result.BackupPath = backupPath
+			if m.opts.Verbose {
+				fmt.Printf("  Backup created: %s\n", backupPath)
+			}
+		}
+	}
+
+	if err := m.downloadAndExtract("gmcorenet/skeleton", version, m.appPath); err != nil {
 		result.Error = err
 		return result
 	}
 
 	result.Success = true
 	fmt.Printf("Skeleton updated: %s -> %s\n", currentVersion, version)
+	if result.BackupPath != "" {
+		fmt.Printf("  Backup: %s\n", result.BackupPath)
+	}
 	return result
 }
 
 func (m *UpdateManager) updateApp() UpdateResult {
 	result := UpdateResult{Target: TargetApp}
 
-	appPath := filepath.Join(m.basePath, m.opts.AppPath)
-	if _, err := os.Stat(appPath); os.IsNotExist(err) {
-		result.Error = fmt.Errorf("app not found at %s", appPath)
+	if _, err := os.Stat(m.appPath); os.IsNotExist(err) {
+		result.Error = fmt.Errorf("app not found at %s", m.appPath)
 		return result
 	}
 
@@ -293,12 +438,12 @@ func (m *UpdateManager) getLatestTag(owner, repo string) (string, error) {
 func (m *UpdateManager) getCurrentVersion(component string) string {
 	switch component {
 	case "framework":
-		versionFile := filepath.Join(m.basePath, m.opts.AppPath, "vendor", "framework", "VERSION")
+		versionFile := filepath.Join(m.appPath, "vendor", "framework", "VERSION")
 		if data, err := os.ReadFile(versionFile); err == nil {
 			return strings.TrimSpace(string(data))
 		}
 	case "skeleton":
-		versionFile := filepath.Join(m.basePath, m.opts.AppPath, "VERSION")
+		versionFile := filepath.Join(m.appPath, "VERSION")
 		if data, err := os.ReadFile(versionFile); err == nil {
 			return strings.TrimSpace(string(data))
 		}
@@ -358,16 +503,59 @@ func (m *UpdateManager) downloadAndExtract(repo, version, destPath string) error
 
 func (m *UpdateManager) rollback(target UpdateTarget) error {
 	for _, result := range m.results {
-		if result.Target == target && result.Success {
+		if result.Target == target && result.Success && result.BackupPath != "" {
 			fmt.Printf("Rolling back %s from %s to %s\n", target, result.To, result.From)
-			return m.downloadAndExtract(
-				fmt.Sprintf("gmcorenet/%s", target),
-				result.From,
-				filepath.Join(m.basePath, m.opts.AppPath, "vendor", string(target)),
-			)
+			fmt.Printf("  Restoring from: %s\n", result.BackupPath)
+
+			var restorePath string
+			switch target {
+			case TargetFramework:
+				restorePath = filepath.Join(m.appPath, "vendor", "framework")
+				if _, err := os.Stat(restorePath); os.IsNotExist(err) {
+					restorePath = filepath.Join(m.appPath, "packages", "framework")
+				}
+			case TargetSDKs:
+				restorePath = filepath.Join(m.appPath, "vendor", "sdks")
+				if _, err := os.Stat(restorePath); os.IsNotExist(err) {
+					restorePath = filepath.Join(m.appPath, "packages", "sdks")
+				}
+			case TargetSkeleton:
+				restorePath = m.appPath
+			default:
+				return fmt.Errorf("unknown target for rollback: %s", target)
+			}
+
+			tmpDir, err := os.MkdirTemp("", "gmcore-rollback-*")
+			if err != nil {
+				return fmt.Errorf("failed to create temp dir: %w", err)
+			}
+			defer os.RemoveAll(tmpDir)
+
+			extractPath := filepath.Join(tmpDir, "restored")
+			if err := extractTarGz(result.BackupPath, extractPath); err != nil {
+				return fmt.Errorf("failed to extract backup: %w", err)
+			}
+
+			entries, err := os.ReadDir(extractPath)
+			if err != nil || len(entries) == 0 {
+				return fmt.Errorf("failed to read backup content")
+			}
+
+			sourceDir := filepath.Join(extractPath, entries[0].Name())
+
+			if err := os.RemoveAll(restorePath); err != nil {
+				fmt.Printf("  Warning: failed to remove current version: %v\n", err)
+			}
+
+			if err := copyDir(sourceDir, restorePath); err != nil {
+				return fmt.Errorf("failed to restore: %w", err)
+			}
+
+			fmt.Printf("Rollback completed successfully\n")
+			return nil
 		}
 	}
-	return fmt.Errorf("no successful update found to rollback")
+	return fmt.Errorf("no successful update with backup found to rollback")
 }
 
 func (m *UpdateManager) printSummary() error {
@@ -387,6 +575,9 @@ func (m *UpdateManager) printSummary() error {
 			succeeded = append(succeeded, string(r.Target))
 		}
 		fmt.Printf("  %s: %s -> %s [%s]\n", r.Target, r.From, r.To, status)
+		if r.BackupPath != "" {
+			fmt.Printf("    Backup: %s\n", r.BackupPath)
+		}
 	}
 
 	fmt.Println("")
@@ -408,7 +599,12 @@ func parseRepo(repo string) (owner, name string) {
 }
 
 func getBasePath() string {
-	return "/opt/gmcore"
+	switch runtime.GOOS {
+	case "windows":
+		return "C:\\ProgramData\\gmcore"
+	default:
+		return "/opt/gmcore"
+	}
 }
 
 func getAllSDKs() []string {
@@ -521,6 +717,54 @@ func extractTarGz(tarballPath, destPath string) error {
 	}
 
 	return nil
+}
+
+func createTarGz(sourcePath, destPath string) error {
+	file, err := os.Create(destPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	gzw := gzip.NewWriter(file)
+	defer gzw.Close()
+
+	tw := tar.NewWriter(gzw)
+	defer tw.Close()
+
+	return filepath.Walk(sourcePath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		relPath, err := filepath.Rel(filepath.Dir(sourcePath), path)
+		if err != nil {
+			return err
+		}
+
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		header.Name = relPath
+
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+
+		if info.IsDir() {
+			return nil
+		}
+
+		srcFile, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer srcFile.Close()
+
+		_, err = io.Copy(tw, srcFile)
+		return err
+	})
 }
 
 func copyDir(src, dst string) error {

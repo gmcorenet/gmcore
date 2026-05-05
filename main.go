@@ -1381,12 +1381,6 @@ func handleUpdate(args []string) {
 		}
 	}
 
-	if appPath == "" {
-		fmt.Fprintln(os.Stderr, "Error: app path is required")
-		printUpdateUsage()
-		os.Exit(1)
-	}
-
 	opts := &update.UpdateOptions{
 		Target:   target,
 		Version:  version,
@@ -1407,21 +1401,26 @@ func printUpdateUsage() {
 	fmt.Println("gmcore-cli update - Update framework, SDKs, and skeleton")
 	fmt.Println("")
 	fmt.Println("Usage:")
-	fmt.Println("  gmcore-cli update <app> [flags]")
+	fmt.Println("  gmcore-cli update [app] [flags]")
+	fmt.Println("  (if app is omitted, uses current directory if inside an app)")
 	fmt.Println("")
 	fmt.Println("Flags:")
 	fmt.Println("  --target=<target>    Target to update: framework, sdks, skeleton, app, all (default: all)")
 	fmt.Println("  --version=<version> Version to install (default: latest)")
-	fmt.Println("  --app=<path>        Application path (required)")
+	fmt.Println("  --app=<path>        Application path (optional if run from app directory)")
 	fmt.Println("  --sdk=<name>        Specific SDK to update (can be used multiple times)")
-	fmt.Println("  --rollback         Rollback on failure")
+	fmt.Println("  --rollback         Rollback on failure (saves backup to /var/gmcore-<app>/backups/)")
 	fmt.Println("  --verbose, -v       Verbose output")
 	fmt.Println("  --help, -h          Show this help")
 	fmt.Println("")
 	fmt.Println("Examples:")
-	fmt.Println("  gmcore-cli update myapp")
-	fmt.Println("  gmcore-cli update myapp --target=framework --version=v1.0.0")
+	fmt.Println("  gmcore-cli update                          # update current app (if in app dir)")
+	fmt.Println("  gmcore-cli update myapp                    # update specific app")
+	fmt.Println("  gmcore-cli update --target=framework --version=v1.0.0")
 	fmt.Println("  gmcore-cli update myapp --target=sdks --sdk=gmcore-orm --sdk=gmcore-log")
 	fmt.Println("  gmcore-cli update myapp --target=all --rollback --verbose")
+	fmt.Println("")
+	fmt.Println("Rollback backups are stored at:")
+	fmt.Println("  /var/gmcore-<app>/backups/<target>_<version>_<timestamp>.tar.gz")
 }
 
