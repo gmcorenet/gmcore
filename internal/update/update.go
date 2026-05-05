@@ -32,6 +32,7 @@ type UpdateOptions struct {
 	AppName  string
 	Rollback bool
 	Verbose  bool
+	Force    bool
 }
 
 type UpdateResult struct {
@@ -388,11 +389,11 @@ func (m *UpdateManager) updateSkeleton() UpdateResult {
 		skeletonPath = "."
 	}
 
-	if err := inst.InstallComponentProtected(installer.Component{
+	mergeResult, err := inst.InstallComponentMerge(installer.Component{
 		Repo:    skeleton.Repo,
 		Release: skeleton.Release,
 		Path:    skeletonPath,
-	}, m.opts.Verbose); err != nil {
+	}, m.opts.Verbose, m.opts.Force); err != nil {
 		result.Error = err
 		return result
 	}
@@ -401,6 +402,12 @@ func (m *UpdateManager) updateSkeleton() UpdateResult {
 	result.To = skeleton.Release
 	result.Success = true
 	fmt.Printf("Skeleton updated: %s -> %s\n", currentVersion, skeleton.Release)
+	if len(mergeResult.Merged) > 0 {
+		fmt.Printf("  Merged %d file(s): %v\n", len(mergeResult.Merged), mergeResult.Merged)
+	}
+	if len(mergeResult.Skipped) > 0 {
+		fmt.Printf("  Skipped %d file(s)\n", len(mergeResult.Skipped))
+	}
 	if result.BackupPath != "" {
 		fmt.Printf("  Backup: %s\n", result.BackupPath)
 	}

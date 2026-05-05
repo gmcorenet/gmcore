@@ -1341,6 +1341,7 @@ func handleUpdate(args []string) {
 	appPath := ""
 	rollback := false
 	verbose := false
+	force := false
 	var sdks []string
 
 	for _, arg := range args {
@@ -1371,6 +1372,8 @@ func handleUpdate(args []string) {
 			rollback = true
 		} else if strings.HasPrefix(arg, "--verbose") || arg == "-v" {
 			verbose = true
+		} else if strings.HasPrefix(arg, "--force") || arg == "-f" {
+			force = true
 		} else if strings.HasPrefix(arg, "--sdk=") {
 			sdkName := strings.TrimPrefix(arg, "--sdk=")
 			sdks = append(sdks, sdkName)
@@ -1389,6 +1392,7 @@ func handleUpdate(args []string) {
 		AppName:  appPath,
 		Rollback: rollback,
 		Verbose:  verbose,
+		Force:    force,
 	}
 
 	manager := update.NewUpdateManager(opts)
@@ -1411,6 +1415,7 @@ func printUpdateUsage() {
 	fmt.Println("  --app=<name>       Application name (optional if run from app directory)")
 	fmt.Println("  --sdk=<name>        Specific SDK to update (can be used multiple times)")
 	fmt.Println("  --rollback         Rollback on failure (saves backup to /var/gmcore-<app>/backups/)")
+	fmt.Println("  --force, -f        Force merge of protected files (skip confirmation)")
 	fmt.Println("  --verbose, -v       Verbose output")
 	fmt.Println("  --help, -h          Show this help")
 	fmt.Println("")
@@ -1419,6 +1424,7 @@ func printUpdateUsage() {
 	fmt.Println("  gmcore-cli update myapp                    # update specific app")
 	fmt.Println("  gmcore-cli update --target=framework --version=v1.0.0")
 	fmt.Println("  gmcore-cli update myapp --target=sdks --sdk=gmcore-orm --sdk=gmcore-log")
+	fmt.Println("  gmcore-cli update myapp --target=skeleton --force  # merge protected files")
 	fmt.Println("  gmcore-cli update myapp --target=all --rollback --verbose")
 	fmt.Println("")
 	fmt.Println("Rollback backups are stored at:")

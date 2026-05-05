@@ -2,12 +2,14 @@ package installer
 
 import (
 	"archive/tar"
+	"bufio"
 	"compress/gzip"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/gmcorenet/gmcore/internal/download"
@@ -17,6 +19,12 @@ type Component struct {
 	Repo    string
 	Release string
 	Path    string
+}
+
+type MergeResult struct {
+	Skipped  []string
+	Merged   []string
+	NewFiles []string
 }
 
 type Installer struct {
@@ -190,6 +198,413 @@ func (i *Installer) InstallComponentProtected(comp Component, verbose bool) erro
 	}
 
 	return nil
+}
+
+func (i *Installer) InstallComponentMerge(comp Component, verbose, force bool) (*MergeResult, error) {
+	release, err := i.resolveRelease(comp.Release, comp.Repo)
+	if err != nil {
+		return nil, err
+	}
+
+	if verbose {
+		fmt.Printf("Installing with merge %s @ %s...\n", comp.Repo, release)
+	}
+
+	owner, name := parseRepo(comp.Repo)
+	tarballURL := fmt.Sprintf(
+		"https://github.com/%s/%s/archive/refs/tags/%s.tar.gz",
+		owner, name, release,
+	)
+
+	if verbose {
+		fmt.Printf("  Downloading from %s\n", tarballURL)
+	}
+
+	tmpDir, err := os.MkdirTemp("", "gmcore-install-*")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	tarballPath := filepath.Join(tmpDir, "component.tar.gz")
+
+	if err := download.File(tarballURL, tarballPath); err != nil {
+		return nil, fmt.Errorf("failed to download %s: %w", comp.Repo, err)
+	}
+
+	extractPath := filepath.Join(tmpDir, "extracted")
+	if err := extractTarGz(tarballPath, extractPath); err != nil {
+		return nil, fmt.Errorf("failed to extract %s: %w", comp.Repo, err)
+	}
+
+	entries, err := os.ReadDir(extractPath)
+	if err != nil || len(entries) == 0 {
+		return nil, fmt.Errorf("failed to read extracted content for %s", comp.Repo)
+	}
+
+	sourceDir := filepath.Join(extractPath, entries[0].Name())
+	destDir := filepath.Join(i.destPath, comp.Path)
+
+	if err := os.MkdirAll(filepath.Dir(destDir), 0755); err != nil {
+		return nil, fmt.Errorf("failed to create directory for %s: %w", comp.Path, err)
+	}
+
+	result := &MergeResult{
+		Skipped:  []string{},
+		Merged:   []string{},
+		NewFiles: []string{},
+	}
+
+	protectedFiles := i.getProtectedFiles(sourceDir)
+	filesToMerge := i.getFilesToMerge(sourceDir, destDir, protectedFiles)
+
+	if len(filesToMerge) > 0 && !force {
+		fmt.Printf("\n  Merge required for %d protected file(s):\n", len(filesToMerge))
+		for _, f := range filesToMerge {
+			fmt.Printf("    - %s\n", f)
+		}
+		fmt.Print("\n  Do you want to merge these files? [y/N] ")
+		reader := bufio.NewReader(os.Stdin)
+		response, _ := reader.ReadString('\n')
+		response = strings.ToLower(strings.TrimSpace(response))
+		if response != "y" && response != "yes" {
+			fmt.Println("  Merge skipped. Use --force to merge without asking.")
+			for _, f := range filesToMerge {
+				result.Skipped = append(result.Skipped, f)
+			}
+			copyDirProtected(sourceDir, destDir, i.protectedPatterns, &result.Skipped)
+			return result, nil
+		}
+	}
+
+	for _, file := range filesToMerge {
+		srcFile := filepath.Join(sourceDir, file)
+		dstFile := filepath.Join(destDir, file)
+
+		if err := i.mergeFile(srcFile, dstFile); err != nil {
+			if verbose {
+				fmt.Printf("    Warning: failed to merge %s: %v\n", file, err)
+			}
+			result.Skipped = append(result.Skipped, file)
+			continue
+		}
+		result.Merged = append(result.Merged, file)
+		if verbose {
+			fmt.Printf("    Merged: %s\n", file)
+		}
+	}
+
+	if err := copyDirProtected(sourceDir, destDir, i.protectedPatterns, &result.Skipped); err != nil {
+		return nil, fmt.Errorf("failed to copy %s to %s: %w", comp.Repo, comp.Path, err)
+	}
+
+	for _, f := range result.Skipped {
+		found := false
+		for _, m := range result.Merged {
+			if m == f {
+				found = true
+				break
+			}
+		}
+		if !found {
+			result.NewFiles = append(result.NewFiles, f)
+		}
+	}
+
+	if verbose {
+		fmt.Printf("  Installed %s to %s (merged %d, skipped %d)\n",
+			comp.Repo, comp.Path, len(result.Merged), len(result.Skipped))
+	}
+
+	return result, nil
+}
+
+func (i *Installer) getProtectedFiles(sourceDir string) map[string]bool {
+	protected := make(map[string]bool)
+	filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			return nil
+		}
+		relPath, err := filepath.Rel(sourceDir, path)
+		if err != nil {
+			return nil
+		}
+		if isProtected(relPath, i.protectedPatterns) {
+			protected[relPath] = true
+		}
+		return nil
+	})
+	return protected
+}
+
+func (i *Installer) getFilesToMerge(sourceDir, destDir string, protected map[string]bool) []string {
+	var toMerge []string
+	for file := range protected {
+		dstFile := filepath.Join(destDir, file)
+		if _, err := os.Stat(dstFile); err == nil {
+			if i.isMergeable(file) {
+				toMerge = append(toMerge, file)
+			}
+		}
+	}
+	return toMerge
+}
+
+func (i *Installer) isMergeable(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	return ext == ".env" || ext == ".yaml" || ext == ".yml" || ext == ".json"
+}
+
+func (i *Installer) mergeFile(src, dst string) error {
+	srcExt := strings.ToLower(filepath.Ext(src))
+
+	switch srcExt {
+	case ".env":
+		return i.mergeEnvFile(src, dst)
+	case ".yaml", ".yml":
+		return i.mergeYamlFile(src, dst)
+	case ".json":
+		return i.mergeJsonFile(src, dst)
+	default:
+		return fmt.Errorf("unsupported merge type: %s", srcExt)
+	}
+}
+
+func (i *Installer) mergeEnvFile(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.Open(dst)
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	srcVars := make(map[string]string)
+	scanner := bufio.NewScanner(srcFile)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if idx := strings.Index(line, "="); idx > 0 {
+			key := strings.TrimSpace(line[:idx])
+			value := strings.TrimSpace(line[idx+1:])
+			srcVars[key] = value
+		}
+	}
+
+	dstVars := make(map[string]string)
+	scanner = bufio.NewScanner(dstFile)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if idx := strings.Index(line, "="); idx > 0 {
+			key := strings.TrimSpace(line[:idx])
+			value := strings.TrimSpace(line[idx+1:])
+			dstVars[key] = value
+		}
+	}
+
+	for key, value := range srcVars {
+		if _, exists := dstVars[key]; !exists {
+			dstVars[key] = value
+		}
+	}
+
+	var newLines []string
+	newLines = append(newLines, "# Generated by GMCore - DO NOT EDIT MANUALLY")
+	newLines = append(newLines, "# Existing local values preserved")
+	for key, value := range dstVars {
+		newLines = append(newLines, fmt.Sprintf("%s=%s", key, value))
+	}
+
+	output := strings.Join(newLines, "\n")
+	return os.WriteFile(dst, []byte(output+"\n"), 0644)
+}
+
+func (i *Installer) mergeYamlFile(src, dst string) error {
+	srcData, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	dstData, err := os.ReadFile(dst)
+	if err != nil {
+		return err
+	}
+
+	srcMap, err := parseYamlSimple(string(srcData))
+	if err != nil {
+		return err
+	}
+	dstMap, err := parseYamlSimple(string(dstData))
+	if err != nil {
+		return err
+	}
+
+	mergeYamlMaps(srcMap, dstMap)
+
+	output, err := formatYaml(dstMap)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(dst, []byte(output), 0644)
+}
+
+func mergeYamlMaps(src, dst map[string]interface{}) {
+	for key, srcVal := range src {
+		if dstVal, exists := dst[key]; exists {
+			if srcMap, srcIsMap := srcVal.(map[string]interface{}); srcIsMap {
+				if dstMap, dstIsMap := dstVal.(map[string]interface{}); dstIsMap {
+					mergeYamlMaps(srcMap, dstMap)
+					dst[key] = dstMap
+				} else {
+					dst[key] = srcVal
+				}
+			} else {
+				// Key exists in dst, preserve dst value (don't overwrite)
+			}
+		} else {
+			dst[key] = srcVal
+		}
+	}
+}
+
+func (i *Installer) mergeJsonFile(src, dst string) error {
+	srcData, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	dstData, err := os.ReadFile(dst)
+	if err != nil {
+		return err
+	}
+
+	srcMap, err := parseJsonSimple(string(srcData))
+	if err != nil {
+		return err
+	}
+	dstMap, err := parseJsonSimple(string(dstData))
+	if err != nil {
+		return err
+	}
+
+	mergeJsonMaps(srcMap, dstMap)
+
+	output, err := formatJson(dstMap)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(dst, []byte(output), 0644)
+}
+
+func mergeJsonMaps(src, dst map[string]interface{}) {
+	for key, srcVal := range src {
+		if dstVal, exists := dst[key]; exists {
+			if srcMap, srcIsMap := srcVal.(map[string]interface{}); srcIsMap {
+				if dstMap, dstIsMap := dstVal.(map[string]interface{}); dstIsMap {
+					mergeJsonMaps(srcMap, dstMap)
+					dst[key] = dstMap
+				} else {
+					// Key exists in dst with different type, preserve dst
+				}
+			} else {
+				// Key exists in dst, preserve dst value (don't overwrite)
+			}
+		} else {
+			dst[key] = srcVal
+		}
+	}
+}
+
+func parseYamlSimple(content string) (map[string]interface{}, error) {
+	result := make(map[string]interface{})
+	lines := strings.Split(content, "\n")
+	var currentIndent int
+	var currentKey string
+
+	for _, line := range lines {
+		trimmed := strings.TrimLeft(line, " \t")
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		indent := len(line) - len(trimmed)
+		parts := strings.SplitN(trimmed, ":", 2)
+
+		if len(parts) < 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		if indent == 0 {
+			currentKey = key
+			if value != "" {
+				result[key] = value
+			} else {
+				if result[key] == nil {
+					result[key] = make(map[string]interface{})
+				}
+			}
+			currentIndent = indent
+		} else if indent > currentIndent && currentKey != "" {
+		}
+	}
+	return result, nil
+}
+
+func parseJsonSimple(content string) (map[string]interface{}, error) {
+	result := make(map[string]interface{})
+	re := regexp.MustCompile(`"([^"]+)":\s*"?([^",\}]+)"?`)
+	matches := re.FindAllStringSubmatch(content, -1)
+	for _, match := range matches {
+		key := match[1]
+		value := strings.Trim(match[2], `" \t`)
+		result[key] = value
+	}
+	return result, nil
+}
+
+func formatYaml(data map[string]interface{}) (string, error) {
+	var lines []string
+	for key, value := range data {
+		if m, ok := value.(map[string]interface{}); ok {
+			lines = append(lines, fmt.Sprintf("%s:", key))
+			for k, v := range m {
+				lines = append(lines, fmt.Sprintf("  %s: %v", k, v))
+			}
+		} else {
+			lines = append(lines, fmt.Sprintf("%s: %v", key, value))
+		}
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+func formatJson(data map[string]interface{}) (string, error) {
+	var lines []string
+	lines = append(lines, "{")
+	for key, value := range data {
+		if m, ok := value.(map[string]interface{}); ok {
+			subJson, _ := formatJson(m)
+			lines = append(lines, fmt.Sprintf(`  "%s": %s,`, key, subJson))
+		} else {
+			lines = append(lines, fmt.Sprintf(`  "%s": "%v",`, key, value))
+		}
+	}
+	lines = append(lines, "}")
+	return strings.Join(lines, "\n"), nil
 }
 
 func (i *Installer) resolveRelease(release, repo string) (string, error) {
