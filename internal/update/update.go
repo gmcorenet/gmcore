@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 type UpdateTarget string
@@ -27,7 +29,7 @@ type UpdateOptions struct {
 	Target     UpdateTarget
 	Version    string
 	SDKs       []string
-	AppPath    string
+	AppName    string
 	Rollback   bool
 	Verbose    bool
 	SkipVerify bool
@@ -48,6 +50,26 @@ type UpdateManager struct {
 	results  []UpdateResult
 	basePath string
 	appPath  string
+	manifest *AppManifest
+}
+
+type AppManifest struct {
+	Version   string                 `yaml:"version"`
+	Name      string                 `yaml:"name"`
+	Framework ManifestComponent      `yaml:"framework"`
+	SDKs      []ManifestSDKComponent `yaml:"sdks"`
+	Skeleton  ManifestComponent      `yaml:"skeleton"`
+}
+
+type ManifestComponent struct {
+	Repo    string `yaml:"repo"`
+	Release string `yaml:"release"`
+	Path    string `yaml:"path"`
+}
+
+type ManifestSDKComponent struct {
+	Name    string `yaml:"name"`
+	Release string `yaml:"release"`
 }
 
 func NewUpdateManager(opts *UpdateOptions) *UpdateManager {
@@ -57,12 +79,14 @@ func NewUpdateManager(opts *UpdateOptions) *UpdateManager {
 		basePath: getBasePath(),
 	}
 
-	if opts.AppPath != "" {
-		m.appPath = opts.AppPath
+	if opts.AppName != "" {
+		m.appPath = filepath.Join(m.basePath, "gmcore-"+opts.AppName)
 	} else if detected := detectAppRoot(); detected != "" {
 		m.appPath = detected
-	} else {
-		m.appPath = ""
+		parts := strings.Split(filepath.Base(detected), "-")
+		if len(parts) >= 2 && parts[0] == "gmcore" {
+			m.opts.AppName = strings.Join(parts[1:], "-")
+		}
 	}
 
 	return m
@@ -99,6 +123,10 @@ func detectAppRoot() string {
 	}
 
 	appName := parts[0]
+	if !strings.HasPrefix(appName, "gmcore-") {
+		return ""
+	}
+
 	appRoot := filepath.Join(basePath, appName)
 	if _, err := os.Stat(appRoot); err != nil {
 		return ""
@@ -109,13 +137,23 @@ func detectAppRoot() string {
 
 func (m *UpdateManager) Run() error {
 	if m.appPath == "" {
-		return fmt.Errorf("app path is required. Run from an app directory or use --app=<path>")
+		return fmt.Errorf("app name is required. Run from an app directory or use --app=<name>")
 	}
 
+	if _, err := os.Stat(m.appPath); os.IsNotExist(err) {
+		return fmt.Errorf("app not found: %s", m.opts.AppName)
+	}
+
+	manifest, err := m.fetchManifest(m.opts.Version)
+	if err != nil {
+		return fmt.Errorf("failed to fetch manifest: %w", err)
+	}
+	m.manifest = manifest
+
 	if m.opts.Verbose {
-		fmt.Printf("App: %s\n", m.appPath)
+		fmt.Printf("App: %s\n", m.opts.AppName)
+		fmt.Printf("Manifest version: %s\n", manifest.Version)
 		fmt.Printf("Update targets: %v\n", m.resolveTargets())
-		fmt.Printf("Version: %s\n", m.opts.Version)
 		fmt.Printf("Rollback on failure: %v\n", m.opts.Rollback)
 		fmt.Println("")
 	}
@@ -145,6 +183,52 @@ func (m *UpdateManager) Run() error {
 	}
 
 	return m.printSummary()
+}
+
+func (m *UpdateManager) fetchManifest(version string) (*AppManifest, error) {
+	if version == "" || version == "latest" {
+		version = "main"
+	}
+
+	url := fmt.Sprintf("https://raw.githubusercontent.com/gmcorenet/manifest/%s/app/v1.0.yaml", version)
+
+	if m.opts.Verbose {
+		fmt.Printf("Fetching manifest from: %s\n", url)
+	}
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch manifest: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 404 {
+		return nil, fmt.Errorf("manifest not found for version: %s", version)
+	}
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("failed to fetch manifest: HTTP %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read manifest: %w", err)
+	}
+
+	return parseManifest(data)
+}
+
+func parseManifest(data []byte) (*AppManifest, error) {
+	var manifest AppManifest
+	if err := yaml.Unmarshal(data, &manifest); err != nil {
+		return nil, fmt.Errorf("failed to parse manifest: %w", err)
+	}
+
+	if manifest.Version == "" {
+		manifest.Version = "1.0"
+	}
+
+	return &manifest, nil
 }
 
 func (m *UpdateManager) resolveTargets() []UpdateTarget {
@@ -177,8 +261,7 @@ func (m *UpdateManager) updateTarget(target UpdateTarget) UpdateResult {
 }
 
 func (m *UpdateManager) getBackupDir() string {
-	appName := filepath.Base(m.appPath)
-	varDir := filepath.Join("/var", "gmcore-"+appName, "backups")
+	varDir := filepath.Join("/var", "gmcore-"+m.opts.AppName, "backups")
 	os.MkdirAll(varDir, 0755)
 	return varDir
 }
@@ -192,17 +275,17 @@ func (m *UpdateManager) createBackup(target UpdateTarget, version string) (strin
 	var sourcePath string
 	switch target {
 	case TargetFramework:
-		sourcePath = filepath.Join(m.appPath, "vendor", "framework")
-		if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
-			sourcePath = filepath.Join(m.appPath, "packages", "framework")
+		sourcePath = filepath.Join(m.appPath, m.manifest.Framework.Path)
+		if sourcePath == "" {
+			sourcePath = filepath.Join(m.appPath, "vendor", "framework")
 		}
 	case TargetSDKs:
 		sourcePath = filepath.Join(m.appPath, "vendor", "sdks")
-		if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
-			sourcePath = filepath.Join(m.appPath, "packages", "sdks")
-		}
 	case TargetSkeleton:
-		sourcePath = m.appPath
+		sourcePath = filepath.Join(m.appPath, m.manifest.Skeleton.Path)
+		if sourcePath == "" || sourcePath == "." {
+			sourcePath = m.appPath
+		}
 	case TargetApp:
 		sourcePath = m.appPath
 	default:
@@ -223,23 +306,20 @@ func (m *UpdateManager) createBackup(target UpdateTarget, version string) (strin
 func (m *UpdateManager) updateFramework() UpdateResult {
 	result := UpdateResult{Target: TargetFramework}
 
-	version, err := m.resolveVersion("gmcorenet", "framework", m.opts.Version)
-	if err != nil {
-		result.Error = err
-		return result
-	}
+	component := m.manifest.Framework
+	version := m.resolveVersion(component.Release)
 
-	currentVersion := m.getCurrentVersion("framework")
+	currentVersion := m.getCurrentVersion()
 	result.From = currentVersion
 	result.To = version
 
 	if m.opts.Verbose {
-		fmt.Printf("  Framework: %s -> %s\n", currentVersion, version)
+		fmt.Printf("  Framework: %s -> %s (repo: %s)\n", currentVersion, version, component.Repo)
 	}
 
-	frameworkPath := filepath.Join(m.appPath, "vendor", "framework")
-	if _, err := os.Stat(frameworkPath); os.IsNotExist(err) {
-		frameworkPath = filepath.Join(m.appPath, "packages", "framework")
+	destPath := filepath.Join(m.appPath, component.Path)
+	if destPath == "" || destPath == "." {
+		destPath = filepath.Join(m.appPath, "vendor", "framework")
 	}
 
 	if m.opts.Rollback {
@@ -254,7 +334,7 @@ func (m *UpdateManager) updateFramework() UpdateResult {
 		}
 	}
 
-	if err := m.downloadAndExtract("gmcorenet/framework", version, frameworkPath); err != nil {
+	if err := m.downloadAndExtract(component.Repo, version, destPath); err != nil {
 		result.Error = err
 		return result
 	}
@@ -270,22 +350,23 @@ func (m *UpdateManager) updateFramework() UpdateResult {
 func (m *UpdateManager) updateSDKs() UpdateResult {
 	result := UpdateResult{Target: TargetSDKs}
 
-	if len(m.opts.SDKs) == 0 {
-		m.opts.SDKs = getAllSDKs()
+	sdksToUpdate := m.opts.SDKs
+	if len(sdksToUpdate) == 0 {
+		for _, sdk := range m.manifest.SDKs {
+			sdksToUpdate = append(sdksToUpdate, sdk.Name)
+		}
 	}
 
-	version, err := m.resolveVersion("gmcorenet", "sdk", m.opts.Version)
-	if err != nil {
-		result.Error = err
-		return result
+	var baseVersion string
+	if len(m.manifest.SDKs) > 0 {
+		baseVersion = m.manifest.SDKs[0].Release
 	}
-
+	version := m.resolveVersion(baseVersion)
 	result.From = "previous"
 	result.To = version
 
-	sdkPath := filepath.Join(m.appPath, "vendor", "sdks")
-	if _, err := os.Stat(sdkPath); os.IsNotExist(err) {
-		sdkPath = filepath.Join(m.appPath, "packages", "sdks")
+	if m.opts.Verbose {
+		fmt.Printf("  SDKs base version: %s\n", version)
 	}
 
 	if m.opts.Rollback {
@@ -301,26 +382,41 @@ func (m *UpdateManager) updateSDKs() UpdateResult {
 	}
 
 	successCount := 0
-	for _, sdk := range m.opts.SDKs {
-		if m.opts.Verbose {
-			fmt.Printf("  Updating SDK: %s\n", sdk)
+	for _, sdkName := range sdksToUpdate {
+		var sdkRelease string
+
+		for _, sdk := range m.manifest.SDKs {
+			if sdk.Name == sdkName {
+				sdkRelease = sdk.Release
+				break
+			}
 		}
 
-		sdkFullPath := filepath.Join(sdkPath, sdk)
-		if err := m.downloadAndExtract(fmt.Sprintf("gmcorenet/sdk"), version, sdkFullPath); err != nil {
-			fmt.Printf("  Warning: failed to update %s: %v\n", sdk, err)
+		if sdkRelease == "" {
+			sdkRelease = baseVersion
+		}
+
+		sdkVersion := m.resolveVersion(sdkRelease)
+
+		sdkFullPath := filepath.Join(m.appPath, "vendor", "sdks", sdkName)
+		if m.opts.Verbose {
+			fmt.Printf("  Updating SDK: %s @ %s\n", sdkName, sdkVersion)
+		}
+
+		if err := m.downloadAndExtract("gmcorenet/sdk", sdkVersion, sdkFullPath); err != nil {
+			fmt.Printf("  Warning: failed to update %s: %v\n", sdkName, err)
 			continue
 		}
 		successCount++
 	}
 
-	if successCount == 0 {
+	if successCount == 0 && len(sdksToUpdate) > 0 {
 		result.Error = fmt.Errorf("no SDKs updated successfully")
 		return result
 	}
 
 	result.Success = true
-	fmt.Printf("SDKs updated (%d/%d): %s\n", successCount, len(m.opts.SDKs), version)
+	fmt.Printf("SDKs updated (%d/%d): %s\n", successCount, len(sdksToUpdate), version)
 	if result.BackupPath != "" {
 		fmt.Printf("  Backup: %s\n", result.BackupPath)
 	}
@@ -330,18 +426,20 @@ func (m *UpdateManager) updateSDKs() UpdateResult {
 func (m *UpdateManager) updateSkeleton() UpdateResult {
 	result := UpdateResult{Target: TargetSkeleton}
 
-	version, err := m.resolveVersion("gmcorenet", "skeleton", m.opts.Version)
-	if err != nil {
-		result.Error = err
-		return result
-	}
+	component := m.manifest.Skeleton
+	version := m.resolveVersion(component.Release)
 
-	currentVersion := m.getCurrentVersion("skeleton")
+	currentVersion := m.getCurrentVersion()
 	result.From = currentVersion
 	result.To = version
 
 	if m.opts.Verbose {
-		fmt.Printf("  Skeleton: %s -> %s\n", currentVersion, version)
+		fmt.Printf("  Skeleton: %s -> %s (repo: %s)\n", currentVersion, version, component.Repo)
+	}
+
+	destPath := filepath.Join(m.appPath, component.Path)
+	if destPath == "" || destPath == "." {
+		destPath = m.appPath
 	}
 
 	if m.opts.Rollback {
@@ -356,7 +454,7 @@ func (m *UpdateManager) updateSkeleton() UpdateResult {
 		}
 	}
 
-	if err := m.downloadAndExtract("gmcorenet/skeleton", version, m.appPath); err != nil {
+	if err := m.downloadAndExtract(component.Repo, version, destPath); err != nil {
 		result.Error = err
 		return result
 	}
@@ -378,84 +476,38 @@ func (m *UpdateManager) updateApp() UpdateResult {
 	}
 
 	result.From = "current"
-	result.To = m.opts.Version
+	result.To = m.manifest.Version
 
-	if m.opts.Version != "" && m.opts.Version != "latest" {
-		fmt.Printf("Updating app to version: %s\n", m.opts.Version)
-	}
+	fmt.Printf("App manifest version: %s\n", m.manifest.Version)
 
 	result.Success = true
 	return result
 }
 
-func (m *UpdateManager) resolveVersion(owner, repo, version string) (string, error) {
-	if version == "" || version == "latest" {
-		tag, err := m.getLatestTag(owner, repo)
-		if err != nil {
-			return "main", err
-		}
-		return tag, nil
+func (m *UpdateManager) resolveVersion(release string) string {
+	if release == "" || release == "latest" {
+		return "main"
 	}
 
-	if strings.HasPrefix(version, "v") || strings.HasPrefix(version, "1.") {
-		return version, nil
+	if strings.HasPrefix(release, "v") || strings.HasPrefix(release, "1.") {
+		return release
 	}
 
-	return "v" + version, nil
+	return "v" + release
 }
 
-func (m *UpdateManager) getLatestTag(owner, repo string) (string, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
-
-	resp, err := http.Get(url)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("failed to get latest release: HTTP %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	bodyStr := string(body)
-	for _, line := range strings.Split(bodyStr, "\n") {
-		if strings.Contains(line, `"tag_name"`) {
-			parts := strings.Split(line, `"`)
-			if len(parts) >= 4 {
-				return parts[3], nil
-			}
-		}
-	}
-
-	return "v1.0.0", nil
-}
-
-func (m *UpdateManager) getCurrentVersion(component string) string {
-	switch component {
-	case "framework":
-		versionFile := filepath.Join(m.appPath, "vendor", "framework", "VERSION")
-		if data, err := os.ReadFile(versionFile); err == nil {
-			return strings.TrimSpace(string(data))
-		}
-	case "skeleton":
-		versionFile := filepath.Join(m.appPath, "VERSION")
-		if data, err := os.ReadFile(versionFile); err == nil {
-			return strings.TrimSpace(string(data))
-		}
+func (m *UpdateManager) getCurrentVersion() string {
+	versionFile := filepath.Join(m.appPath, "VERSION")
+	if data, err := os.ReadFile(versionFile); err == nil {
+		return strings.TrimSpace(string(data))
 	}
 	return "unknown"
 }
 
 func (m *UpdateManager) downloadAndExtract(repo, version, destPath string) error {
-	owner, name := parseRepo(repo)
 	tarballURL := fmt.Sprintf(
-		"https://github.com/%s/%s/archive/refs/tags/%s.tar.gz",
-		owner, name, version,
+		"https://github.com/%s/archive/refs/tags/%s.tar.gz",
+		repo, version,
 	)
 
 	tmpDir, err := os.MkdirTemp("", "gmcore-update-*")
@@ -510,17 +562,17 @@ func (m *UpdateManager) rollback(target UpdateTarget) error {
 			var restorePath string
 			switch target {
 			case TargetFramework:
-				restorePath = filepath.Join(m.appPath, "vendor", "framework")
-				if _, err := os.Stat(restorePath); os.IsNotExist(err) {
-					restorePath = filepath.Join(m.appPath, "packages", "framework")
+				restorePath = filepath.Join(m.appPath, m.manifest.Framework.Path)
+				if restorePath == "" {
+					restorePath = filepath.Join(m.appPath, "vendor", "framework")
 				}
 			case TargetSDKs:
 				restorePath = filepath.Join(m.appPath, "vendor", "sdks")
-				if _, err := os.Stat(restorePath); os.IsNotExist(err) {
-					restorePath = filepath.Join(m.appPath, "packages", "sdks")
-				}
 			case TargetSkeleton:
-				restorePath = m.appPath
+				restorePath = filepath.Join(m.appPath, m.manifest.Skeleton.Path)
+				if restorePath == "" || restorePath == "." {
+					restorePath = m.appPath
+				}
 			default:
 				return fmt.Errorf("unknown target for rollback: %s", target)
 			}
@@ -590,61 +642,12 @@ func (m *UpdateManager) printSummary() error {
 	return nil
 }
 
-func parseRepo(repo string) (owner, name string) {
-	parts := strings.Split(repo, "/")
-	if len(parts) == 2 {
-		return parts[0], parts[1]
-	}
-	return "", repo
-}
-
 func getBasePath() string {
 	switch runtime.GOOS {
 	case "windows":
 		return "C:\\ProgramData\\gmcore"
 	default:
 		return "/opt/gmcore"
-	}
-}
-
-func getAllSDKs() []string {
-	return []string{
-		"gmcore-asset",
-		"gmcore-bundle",
-		"gmcore-cache",
-		"gmcore-cert",
-		"gmcore-config",
-		"gmcore-console",
-		"gmcore-crud",
-		"gmcore-error",
-		"gmcore-events",
-		"gmcore-expression",
-		"gmcore-form",
-		"gmcore-httpclient",
-		"gmcore-i18n",
-		"gmcore-lifecycle",
-		"gmcore-lock",
-		"gmcore-log",
-		"gmcore-mailer",
-		"gmcore-messenger",
-		"gmcore-migrations",
-		"gmcore-notifier",
-		"gmcore-orm",
-		"gmcore-ratelimit",
-		"gmcore-resolver",
-		"gmcore-response",
-		"gmcore-router",
-		"gmcore-scheduler",
-		"gmcore-security",
-		"gmcore-serializer",
-		"gmcore-session",
-		"gmcore-settings",
-		"gmcore-templating",
-		"gmcore-uid",
-		"gmcore-validation",
-		"gmcore-view",
-		"gmcore-webhook",
-		"gmcore-workflow",
 	}
 }
 

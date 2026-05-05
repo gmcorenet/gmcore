@@ -1386,7 +1386,7 @@ func handleUpdate(args []string) {
 		Target:   target,
 		Version:  version,
 		SDKs:     sdks,
-		AppPath:  appPath,
+		AppName:  appPath,
 		Rollback: rollback,
 		Verbose:  verbose,
 	}
