@@ -16,13 +16,14 @@ import (
 	"github.com/gmcorenet/gmcore/internal/download"
 	"github.com/gmcorenet/gmcore/internal/installer"
 	"github.com/gmcorenet/gmcore/internal/manifest"
+	"github.com/gmcorenet/gmcore/internal/update"
 	"github.com/gmcorenet/gmcore/internal/version"
 )
 
 const cliVersion = "v0.5.0"
 const repo = "gmcorenet/gmcore"
 
-var availableCommands = []string{"create", "remove", "list", "status", "version", "self-update", "bundle", "bundles", "bundle-make"}
+var availableCommands = []string{"create", "remove", "list", "status", "version", "self-update", "bundle", "bundles", "bundle-make", "update"}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -159,6 +160,9 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 			os.Exit(1)
 		}
+
+	case "update":
+		handleUpdate(os.Args[2:])
 
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", cmd)
@@ -309,6 +313,7 @@ func printUsage() {
 	fmt.Println("  gmcore-cli status [appname]       Show application status")
 	fmt.Println("  gmcore-cli list-versions          List available framework versions")
 	fmt.Println("  gmcore-cli self-update [version] Update CLI to latest or specific version")
+	fmt.Println("  gmcore-cli update <app> [flags]  Update framework, SDKs, or skeleton")
 	fmt.Println("  gmcore-cli version               Show version information")
 	fmt.Println("  gmcore-cli install               Install CLI (requires root/sudo)")
 	fmt.Println("  gmcore-cli uninstall [--purge [--confirm-purge]]  Uninstall CLI")
@@ -322,6 +327,7 @@ func printUsage() {
 	fmt.Println("  gmcore-cli remove myapp")
 	fmt.Println("  gmcore-cli remove myapp --purge")
 	fmt.Println("  gmcore-cli status")
+	fmt.Println("  gmcore-cli update myapp --target=all --rollback")
 	fmt.Println("  sudo gmcore-cli uninstall --purge --confirm-purge")
 	fmt.Println("")
 	fmt.Println("Local example:")
@@ -1327,5 +1333,95 @@ func handleBundleInstall(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func handleUpdate(args []string) {
+	target := update.TargetAll
+	version := "latest"
+	appPath := ""
+	rollback := false
+	verbose := false
+	var sdks []string
+
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--target=") {
+			targetStr := strings.TrimPrefix(arg, "--target=")
+			switch targetStr {
+			case "framework":
+				target = update.TargetFramework
+			case "sdks":
+				target = update.TargetSDKs
+			case "skeleton":
+				target = update.TargetSkeleton
+			case "app":
+				target = update.TargetApp
+			case "all":
+				target = update.TargetAll
+			default:
+				fmt.Fprintf(os.Stderr, "Unknown target: %s\n", targetStr)
+				fmt.Fprintln(os.Stderr, "Valid targets: framework, sdks, skeleton, app, all")
+				os.Exit(1)
+			}
+		} else if strings.HasPrefix(arg, "--version=") {
+			version = strings.TrimPrefix(arg, "--version=")
+		} else if strings.HasPrefix(arg, "--app=") {
+			appPath = strings.TrimPrefix(arg, "--app=")
+		} else if strings.HasPrefix(arg, "--rollback") {
+			rollback = true
+		} else if strings.HasPrefix(arg, "--verbose") || arg == "-v" {
+			verbose = true
+		} else if strings.HasPrefix(arg, "--sdk=") {
+			sdkName := strings.TrimPrefix(arg, "--sdk=")
+			sdks = append(sdks, sdkName)
+		} else if arg == "--help" || arg == "-h" {
+			printUpdateUsage()
+			os.Exit(0)
+		} else if !strings.HasPrefix(arg, "--") && appPath == "" {
+			appPath = arg
+		}
+	}
+
+	if appPath == "" {
+		fmt.Fprintln(os.Stderr, "Error: app path is required")
+		printUpdateUsage()
+		os.Exit(1)
+	}
+
+	opts := &update.UpdateOptions{
+		Target:   target,
+		Version:  version,
+		SDKs:     sdks,
+		AppPath:  appPath,
+		Rollback: rollback,
+		Verbose:  verbose,
+	}
+
+	manager := update.NewUpdateManager(opts)
+	if err := manager.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Update failed: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func printUpdateUsage() {
+	fmt.Println("gmcore-cli update - Update framework, SDKs, and skeleton")
+	fmt.Println("")
+	fmt.Println("Usage:")
+	fmt.Println("  gmcore-cli update <app> [flags]")
+	fmt.Println("")
+	fmt.Println("Flags:")
+	fmt.Println("  --target=<target>    Target to update: framework, sdks, skeleton, app, all (default: all)")
+	fmt.Println("  --version=<version> Version to install (default: latest)")
+	fmt.Println("  --app=<path>        Application path (required)")
+	fmt.Println("  --sdk=<name>        Specific SDK to update (can be used multiple times)")
+	fmt.Println("  --rollback         Rollback on failure")
+	fmt.Println("  --verbose, -v       Verbose output")
+	fmt.Println("  --help, -h          Show this help")
+	fmt.Println("")
+	fmt.Println("Examples:")
+	fmt.Println("  gmcore-cli update myapp")
+	fmt.Println("  gmcore-cli update myapp --target=framework --version=v1.0.0")
+	fmt.Println("  gmcore-cli update myapp --target=sdks --sdk=gmcore-orm --sdk=gmcore-log")
+	fmt.Println("  gmcore-cli update myapp --target=all --rollback --verbose")
 }
 
