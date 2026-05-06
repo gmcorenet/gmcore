@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 var releaseBaseURL = "https://github.com/gmcorenet/sdk/releases/download"
@@ -66,6 +67,10 @@ func ExtractTarGz(tarball, dest string) error {
 		}
 
 		target := filepath.Join(dest, header.Name)
+
+		if !strings.HasPrefix(filepath.Clean(target), filepath.Clean(dest)+string(os.PathSeparator)) && target != filepath.Clean(dest) {
+			return fmt.Errorf("path traversal detected: %s", header.Name)
+		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:

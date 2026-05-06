@@ -10,11 +10,11 @@ import (
 )
 
 type Manifest struct {
-	Version  string           `yaml:"version"`
-	Name     string           `yaml:"name"`
-	Framework Component       `yaml:"framework"`
-	SDKs     []SDKComponent   `yaml:"sdks"`
-	Skeleton Component       `yaml:"skeleton"`
+	Version   string         `yaml:"version"`
+	Name      string         `yaml:"name"`
+	Framework Component      `yaml:"framework"`
+	SDKs      []SDKComponent `yaml:"sdks"`
+	Skeleton  Component      `yaml:"skeleton"`
 }
 
 type Component struct {
@@ -26,6 +26,27 @@ type Component struct {
 type SDKComponent struct {
 	Name    string `yaml:"name"`
 	Release string `yaml:"release"`
+}
+
+type AppProfile string
+
+const (
+	AppProfileStandard AppProfile = "standard"
+	AppProfileGateway  AppProfile = "gateway"
+)
+
+var baselineSDKs = []string{
+	"gmcore-transport",
+	"gmcore-lifecycle",
+	"gmcore-log",
+	"gmcore-security",
+	"gmcore-ratelimit",
+}
+
+var gatewaySDKs = []string{
+	"gmcore-router",
+	"gmcore-events",
+	"gmcore-validation",
 }
 
 func Fetch(owner, repo, version string) (*Manifest, error) {
@@ -76,6 +97,62 @@ func (m *Manifest) GetFramework() Component {
 
 func (m *Manifest) GetSDKs() []SDKComponent {
 	return m.SDKs
+}
+
+func ProfileForAppName(appName string) AppProfile {
+	name := strings.ToLower(strings.TrimSpace(appName))
+	if name == "gateway" || name == "gmcore-gateway" {
+		return AppProfileGateway
+	}
+	return AppProfileStandard
+}
+
+func (m *Manifest) EffectiveSDKs(appName string) []SDKComponent {
+	result := make([]SDKComponent, 0, len(m.SDKs)+len(baselineSDKs)+len(gatewaySDKs))
+	index := make(map[string]int, len(m.SDKs)+len(baselineSDKs)+len(gatewaySDKs))
+
+	fallbackRelease := "latest"
+	if len(m.SDKs) > 0 && strings.TrimSpace(m.SDKs[0].Release) != "" {
+		fallbackRelease = m.SDKs[0].Release
+	} else if strings.TrimSpace(m.Framework.Release) != "" {
+		fallbackRelease = m.Framework.Release
+	}
+
+	for _, sdk := range m.SDKs {
+		name := strings.TrimSpace(sdk.Name)
+		if name == "" {
+			continue
+		}
+		release := strings.TrimSpace(sdk.Release)
+		if release == "" {
+			release = fallbackRelease
+		}
+		if pos, ok := index[name]; ok {
+			if result[pos].Release == "" {
+				result[pos].Release = release
+			}
+			continue
+		}
+		index[name] = len(result)
+		result = append(result, SDKComponent{Name: name, Release: release})
+	}
+
+	ensure := func(names []string) {
+		for _, name := range names {
+			if _, ok := index[name]; ok {
+				continue
+			}
+			index[name] = len(result)
+			result = append(result, SDKComponent{Name: name, Release: fallbackRelease})
+		}
+	}
+
+	ensure(baselineSDKs)
+	if ProfileForAppName(appName) == AppProfileGateway {
+		ensure(gatewaySDKs)
+	}
+
+	return result
 }
 
 func (m *Manifest) GetSkeleton() Component {

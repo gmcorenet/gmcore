@@ -3,7 +3,6 @@ package installer
 import (
 	"archive/tar"
 	"bufio"
-	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
@@ -11,9 +10,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
+	"github.com/gmcorenet/gmcore/internal/download"
 	"gopkg.in/yaml.v3"
 )
 
@@ -33,12 +32,16 @@ type Installer struct {
 	destPath          string
 	verbose           bool
 	protectedPatterns []string
+	downloader        func(url, path string) error
+	extractor         func(src, dst string) error
 }
 
 func New(destPath string, verbose bool) *Installer {
 	return &Installer{
-		destPath: destPath,
-		verbose:  verbose,
+		destPath:   destPath,
+		verbose:    verbose,
+		downloader: download.File,
+		extractor:  extractTarGz,
 	}
 }
 
@@ -47,13 +50,17 @@ func NewWithProtection(destPath string, verbose bool, protectedPatterns []string
 		destPath:          destPath,
 		verbose:           verbose,
 		protectedPatterns: protectedPatterns,
+		downloader:        download.File,
+		extractor:         extractTarGz,
 	}
 }
 
 func NewWithVars(destPath string, verbose bool) *Installer {
 	return &Installer{
-		destPath: destPath,
-		verbose:  verbose,
+		destPath:   destPath,
+		verbose:    verbose,
+		downloader: download.File,
+		extractor:  extractTarGz,
 	}
 }
 
@@ -101,12 +108,12 @@ func (i *Installer) InstallComponent(comp Component) error {
 
 	tarballPath := filepath.Join(tmpDir, "component.tar.gz")
 
-	if err := download.File(tarballURL, tarballPath); err != nil {
+	if err := i.downloader(tarballURL, tarballPath); err != nil {
 		return fmt.Errorf("failed to download %s: %w", comp.Repo, err)
 	}
 
 	extractPath := filepath.Join(tmpDir, "extracted")
-	if err := extractTarGz(tarballPath, extractPath); err != nil {
+	if err := i.extractor(tarballPath, extractPath); err != nil {
 		return fmt.Errorf("failed to extract %s: %w", comp.Repo, err)
 	}
 
@@ -161,12 +168,12 @@ func (i *Installer) InstallComponentWithVars(comp Component, vars map[string]str
 
 	tarballPath := filepath.Join(tmpDir, "component.tar.gz")
 
-	if err := download.File(tarballURL, tarballPath); err != nil {
+	if err := i.downloader(tarballURL, tarballPath); err != nil {
 		return fmt.Errorf("failed to download %s: %w", comp.Repo, err)
 	}
 
 	extractPath := filepath.Join(tmpDir, "extracted")
-	if err := extractTarGz(tarballPath, extractPath); err != nil {
+	if err := i.extractor(tarballPath, extractPath); err != nil {
 		return fmt.Errorf("failed to extract %s: %w", comp.Repo, err)
 	}
 
@@ -254,6 +261,8 @@ func processConfigWithVars(content, ext string, vars map[string]string) (string,
 }
 
 func processYamlWithVars(content string, vars map[string]string) (string, error) {
+	content = substituteVars(content, vars)
+
 	var doc yaml.Node
 	if err := yaml.Unmarshal([]byte(content), &doc); err != nil {
 		return "", err
@@ -363,12 +372,12 @@ func (i *Installer) InstallComponentProtected(comp Component, verbose bool) erro
 
 	tarballPath := filepath.Join(tmpDir, "component.tar.gz")
 
-	if err := download.File(tarballURL, tarballPath); err != nil {
+	if err := i.downloader(tarballURL, tarballPath); err != nil {
 		return fmt.Errorf("failed to download %s: %w", comp.Repo, err)
 	}
 
 	extractPath := filepath.Join(tmpDir, "extracted")
-	if err := extractTarGz(tarballPath, extractPath); err != nil {
+	if err := i.extractor(tarballPath, extractPath); err != nil {
 		return fmt.Errorf("failed to extract %s: %w", comp.Repo, err)
 	}
 
@@ -439,12 +448,12 @@ func (i *Installer) InstallComponentMerge(comp Component, verbose, force bool) (
 
 	tarballPath := filepath.Join(tmpDir, "component.tar.gz")
 
-	if err := download.File(tarballURL, tarballPath); err != nil {
+	if err := i.downloader(tarballURL, tarballPath); err != nil {
 		return nil, fmt.Errorf("failed to download %s: %w", comp.Repo, err)
 	}
 
 	extractPath := filepath.Join(tmpDir, "extracted")
-	if err := extractTarGz(tarballPath, extractPath); err != nil {
+	if err := i.extractor(tarballPath, extractPath); err != nil {
 		return nil, fmt.Errorf("failed to extract %s: %w", comp.Repo, err)
 	}
 
@@ -739,51 +748,17 @@ func mergeJsonMaps(src, dst map[string]interface{}) {
 }
 
 func parseYamlSimple(content string) (map[string]interface{}, error) {
-	result := make(map[string]interface{})
-	lines := strings.Split(content, "\n")
-	var currentIndent int
-	var currentKey string
-
-	for _, line := range lines {
-		trimmed := strings.TrimLeft(line, " \t")
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-
-		indent := len(line) - len(trimmed)
-		parts := strings.SplitN(trimmed, ":", 2)
-
-		if len(parts) < 2 {
-			continue
-		}
-
-		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-
-		if indent == 0 {
-			currentKey = key
-			if value != "" {
-				result[key] = value
-			} else {
-				if result[key] == nil {
-					result[key] = make(map[string]interface{})
-				}
-			}
-			currentIndent = indent
-		} else if indent > currentIndent && currentKey != "" {
-		}
+	var result map[string]interface{}
+	if err := yaml.Unmarshal([]byte(content), &result); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
 
 func parseJsonSimple(content string) (map[string]interface{}, error) {
-	result := make(map[string]interface{})
-	re := regexp.MustCompile(`"([^"]+)":\s*"?([^",\}]+)"?`)
-	matches := re.FindAllStringSubmatch(content, -1)
-	for _, match := range matches {
-		key := match[1]
-		value := strings.Trim(match[2], `" \t`)
-		result[key] = value
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
@@ -848,21 +823,14 @@ func (i *Installer) getLatestTag(repo string) (string, error) {
 		return "", fmt.Errorf("failed to get latest release: HTTP %d", resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
+	var release struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
 		return "", err
 	}
 
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.Contains(line, `"tag_name"`) {
-			parts := strings.Split(line, `"`)
-			if len(parts) >= 4 {
-				return parts[3], nil
-			}
-		}
-	}
-
-	return "", fmt.Errorf("tag_name not found in response")
+	return release.TagName, nil
 }
 
 func parseRepo(repo string) (owner, name string) {
@@ -898,6 +866,10 @@ func extractTarGz(tarballPath, destPath string) error {
 		}
 
 		target := filepath.Join(destPath, header.Name)
+
+		if !strings.HasPrefix(filepath.Clean(target), filepath.Clean(destPath)+string(os.PathSeparator)) && target != filepath.Clean(destPath) {
+			return fmt.Errorf("path traversal detected: %s", header.Name)
+		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:
@@ -1043,14 +1015,15 @@ func BuildAppVars(appName string, goVersion string) map[string]string {
 }
 
 func toCamelCase(s string) string {
-	words := strings.Fields(s)
-	for i, word := range words {
-		if i == 0 {
-			words[i] = strings.ToLower(word)
-		} else {
-			words[i] = strings.Title(strings.ToLower(word))
+	parts := strings.Split(s, "-")
+	for i := range parts {
+		if len(parts[i]) > 0 {
+			if i == 0 {
+				parts[i] = strings.ToLower(parts[i])
+			} else {
+				parts[i] = strings.ToUpper(parts[i][:1]) + strings.ToLower(parts[i][1:])
+			}
 		}
 	}
-	result := strings.Join(words, "")
-	return strings.Title(strings.ToLower(result))
+	return strings.Join(parts, "")
 }

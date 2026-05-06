@@ -7,9 +7,11 @@ Cross-platform command-line tool for creating and managing GMCore applications.
 - Create new GMCore applications from manifest recipes
 - List and manage installed applications
 - Check application status
+- Start/stop/restart/reload applications
 - Install/uninstall as system service
 - Self-update to latest version
 - List available framework versions
+- Exposure defaults for direct mode or gateway-behind-UDS mode
 - Full support for Linux, macOS, and Windows
 
 ## Installation
@@ -51,6 +53,12 @@ gmcore list
 gmcore status
 gmcore status myapp
 
+# Lifecycle
+gmcore start myapp
+gmcore reload myapp
+gmcore restart myapp
+gmcore stop myapp
+
 # Get help
 gmcore --help
 ```
@@ -67,6 +75,10 @@ gmcore --help
 | `gmcore remove <appname> --purge` | Remove application and all data |
 | `gmcore list` | List all installed applications |
 | `gmcore status [appname]` | Show application status |
+| `gmcore start [appname]` | Start an application |
+| `gmcore stop [appname]` | Stop an application |
+| `gmcore restart [appname]` | Restart an application |
+| `gmcore reload [appname]` | Reload an application |
 
 ### CLI Management
 
@@ -102,6 +114,8 @@ When you create an app, the following structure is created:
 ├── var/
 │   ├── cache/             # Cache files
 │   ├── log/               # Log files
+│   ├── run/               # PID/runtime files
+│   ├── socket/            # UDS sockets
 │   └── tmp/               # Temporary files
 ├── vendor/gmcore/         # Framework source
 ├── migrations/            # Database migrations
@@ -123,6 +137,21 @@ go build -o bin/myapp cmd/app/main.go
 # Run the application
 ./bin/myapp
 ```
+
+## Exposure Modes
+
+Each app supports two runtime exposure modes:
+
+- `direct`: app listens on TCP/IP host+port
+- `internal`: app listens on UDS and is served behind `gateway`
+
+`gateway` is a normal app at `/opt/gmcore/gateway` and is the internet edge reverse proxy on ports `80/443`.
+
+Default files created for new apps:
+
+- `config/transport.yaml`
+- `config/exposure.yaml`
+- `config/gateway.yaml` (gateway app)
 
 ## Requirements
 

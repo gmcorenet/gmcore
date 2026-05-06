@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gmcorenet/gmcore/internal/apps"
 	"github.com/gmcorenet/gmcore/internal/bundle"
 	"github.com/gmcorenet/gmcore/internal/download"
 	"github.com/gmcorenet/gmcore/internal/installer"
@@ -23,8 +24,6 @@ import (
 
 const cliVersion = "v0.5.0"
 const repo = "gmcorenet/gmcore"
-
-var availableCommands = []string{"create", "remove", "list", "status", "version", "self-update", "bundle", "bundles", "bundle-make", "update"}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -40,66 +39,14 @@ func main() {
 		return
 	}
 
-	cmd := os.Args[1]
+	scope := os.Args[1]
 
-	switch cmd {
-	case "create":
-		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: gmcore-cli create <appname> [--version=<version>]")
-			os.Exit(1)
-		}
-		appName := os.Args[2]
-		frameworkVersion := "latest"
-		for _, arg := range os.Args[3:] {
-			if strings.HasPrefix(arg, "--version=") {
-				frameworkVersion = strings.TrimPrefix(arg, "--version=")
-			}
-		}
-		if err := createApp(appName, frameworkVersion); err != nil {
-			fmt.Fprintln(os.Stderr, "Error:", err)
-			os.Exit(1)
-		}
+	switch scope {
+	case "app":
+		handleAppScope(os.Args[2:])
 
-	case "remove":
-		purge := false
-		appName := ""
-		for _, arg := range os.Args[2:] {
-			if arg == "--purge" {
-				purge = true
-			} else if !strings.HasPrefix(arg, "--") && appName == "" {
-				appName = arg
-			}
-		}
-		if appName == "" {
-			fmt.Fprintln(os.Stderr, "Usage: gmcore-cli remove <appname> [--purge]")
-			os.Exit(1)
-		}
-		if err := removeApp(appName, purge); err != nil {
-			fmt.Fprintln(os.Stderr, "Error:", err)
-			os.Exit(1)
-		}
-
-	case "list":
-		if err := listApps(); err != nil {
-			fmt.Fprintln(os.Stderr, "Error:", err)
-			os.Exit(1)
-		}
-
-	case "status":
-		appName := ""
-		if len(os.Args) >= 3 {
-			appName = os.Args[2]
-		}
-		if err := statusApps(appName); err != nil {
-			fmt.Fprintln(os.Stderr, "Error:", err)
-			os.Exit(1)
-		}
-
-	case "list-versions":
-		if err := listVersions(); err != nil {
-			fmt.Fprintln(os.Stderr, "Error:", err)
-			os.Exit(1)
-		}
+	case "bundle":
+		handleBundleScope(os.Args[2:])
 
 	case "self-update":
 		targetVersion := ""
@@ -110,6 +57,9 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 			os.Exit(1)
 		}
+
+	case "update":
+		handleUpdate(os.Args[2:])
 
 	case "version", "--version", "-v":
 		fmt.Printf("gmcore %s\n", cliVersion)
@@ -135,81 +85,127 @@ func main() {
 			os.Exit(1)
 		}
 
-	case "bundle":
-		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: gmcore bundle <command> [flags]")
-			fmt.Fprintln(os.Stderr, "Commands:")
-			fmt.Fprintln(os.Stderr, "  make <name>     Create a new bundle scaffold")
-			fmt.Fprintln(os.Stderr, "  install <name>  Install a bundle from the registry")
-			os.Exit(1)
-		}
-
-		subcmd := os.Args[2]
-
-		switch subcmd {
-		case "make":
-			handleBundleMake(os.Args[3:])
-		case "install":
-			handleBundleInstall(os.Args[3:])
-		default:
-			fmt.Fprintf(os.Stderr, "Unknown bundle command: %s\n", subcmd)
-			os.Exit(1)
-		}
-
-	case "bundles":
-		if err := listBundles(); err != nil {
-			fmt.Fprintln(os.Stderr, "Error:", err)
-			os.Exit(1)
-		}
-
-	case "update":
-		handleUpdate(os.Args[2:])
-
 	default:
-		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", cmd)
+		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", scope)
 		printUsage()
 		os.Exit(1)
 	}
 }
 
+func handleAppScope(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: gmcore app <create|remove|list|status|start|stop|restart|reload|versions>")
+		os.Exit(1)
+	}
+
+	subcmd := args[0]
+	rest := args[1:]
+
+	switch subcmd {
+	case "create":
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "Usage: gmcore app create <appname> [--version=<version>]")
+			os.Exit(1)
+		}
+		appName := rest[0]
+		frameworkVersion := "latest"
+		for _, arg := range rest[1:] {
+			if strings.HasPrefix(arg, "--version=") {
+				frameworkVersion = strings.TrimPrefix(arg, "--version=")
+			}
+		}
+		if err := createApp(appName, frameworkVersion); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+
+	case "remove":
+		purge := false
+		appName := ""
+		for _, arg := range rest {
+			if arg == "--purge" {
+				purge = true
+			} else if !strings.HasPrefix(arg, "--") && appName == "" {
+				appName = arg
+			}
+		}
+		if appName == "" {
+			fmt.Fprintln(os.Stderr, "Usage: gmcore app remove <appname> [--purge]")
+			os.Exit(1)
+		}
+		if err := removeApp(appName, purge); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+
+	case "list":
+		if err := listApps(); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+
+	case "status":
+		appName := ""
+		if len(rest) >= 1 {
+			appName = rest[0]
+		}
+		if err := statusApps(appName); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+
+	case "start", "stop", "restart", "reload":
+		if err := handleLifecycleCommand(subcmd, rest); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+
+	case "versions":
+		if err := listVersions(); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown app command: %s\n", subcmd)
+		fmt.Fprintln(os.Stderr, "Usage: gmcore app <create|remove|list|status|start|stop|restart|reload|versions>")
+		os.Exit(1)
+	}
+}
+
+func handleBundleScope(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: gmcore bundle <make|install|list>")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Commands:")
+		fmt.Fprintln(os.Stderr, "  make <name>        Create a new bundle scaffold")
+		fmt.Fprintln(os.Stderr, "  install <name>     Install a bundle from the registry")
+		fmt.Fprintln(os.Stderr, "  list               List available bundles")
+		os.Exit(1)
+	}
+
+	subcmd := args[0]
+	rest := args[1:]
+
+	switch subcmd {
+	case "make":
+		handleBundleMake(rest)
+	case "install":
+		handleBundleInstall(rest)
+	case "list":
+		if err := listBundles(); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown bundle command: %s\n", subcmd)
+		fmt.Fprintln(os.Stderr, "Usage: gmcore bundle <make|install|list>")
+		os.Exit(1)
+	}
+}
+
 func detectAppRoot() string {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-
-	basePath := getBasePath()
-
-	cwdNormalized := filepath.ToSlash(cwd)
-	basePathNormalized := filepath.ToSlash(basePath)
-
-	if !strings.HasPrefix(cwdNormalized, basePathNormalized) {
-		return ""
-	}
-
-	relative := strings.TrimPrefix(cwdNormalized, basePathNormalized)
-	relative = strings.TrimPrefix(relative, "/")
-
-	if relative == "" || relative == "." {
-		return ""
-	}
-
-	if strings.Contains(relative, "..") {
-		return ""
-	}
-
-	parts := strings.SplitN(relative, "/", 2)
-	if len(parts) < 1 || parts[0] == "" {
-		return ""
-	}
-
-	appName := parts[0]
-	appRoot := filepath.Join(basePath, appName)
-	if _, err := os.Stat(appRoot); err != nil {
-		return ""
-	}
-
-	return appRoot
+	return apps.DetectFromCWD(getBasePath(), "")
 }
 
 func runAppCommand(appRoot string) error {
@@ -305,35 +301,40 @@ func listAppCommands(appRoot string) error {
 }
 
 func printUsage() {
-	fmt.Println("gmcore-cli - GMCore Application Framework CLI")
+	fmt.Println("gmcore - GMCore Application Framework CLI")
 	fmt.Println("")
-	fmt.Println("Usage (global):")
-	fmt.Println("  gmcore-cli create <appname>        Create a new GMCore application")
-	fmt.Println("  gmcore-cli remove <appname [--purge]>  Remove an application")
-	fmt.Println("  gmcore-cli list                   List installed applications")
-	fmt.Println("  gmcore-cli status [appname]       Show application status")
-	fmt.Println("  gmcore-cli list-versions          List available framework versions")
-	fmt.Println("  gmcore-cli self-update [version] Update CLI to latest or specific version")
-	fmt.Println("  gmcore-cli update <app> [flags]  Update framework, SDKs, or skeleton")
-	fmt.Println("  gmcore-cli version               Show version information")
-	fmt.Println("  gmcore-cli install               Install CLI (requires root/sudo)")
-	fmt.Println("  gmcore-cli uninstall [--purge [--confirm-purge]]  Uninstall CLI")
+	fmt.Println("Usage:")
+	fmt.Println("  gmcore app create <appname>              Create a new GMCore application")
+	fmt.Println("  gmcore app remove <appname> [--purge]    Remove an application")
+	fmt.Println("  gmcore app list                          List installed applications")
+	fmt.Println("  gmcore app status [appname]              Show application status")
+	fmt.Println("  gmcore app start [appname]               Start an application")
+	fmt.Println("  gmcore app stop [appname]                Stop an application")
+	fmt.Println("  gmcore app restart [appname]             Restart an application")
+	fmt.Println("  gmcore app reload [appname]              Reload an application")
+	fmt.Println("  gmcore app versions                      List available framework versions")
+	fmt.Println("")
+	fmt.Println("  gmcore bundle make <name>                Create a new bundle scaffold")
+	fmt.Println("  gmcore bundle install <name>             Install a bundle from the registry")
+	fmt.Println("  gmcore bundle list                       List available bundles")
+	fmt.Println("")
+	fmt.Println("  gmcore update [app] [flags]              Update framework, SDKs, or skeleton")
+	fmt.Println("  gmcore self-update [version]             Update CLI to latest or specific version")
+	fmt.Println("")
+	fmt.Println("  gmcore version                           Show version information")
+	fmt.Println("  gmcore install                           Install CLI to /usr/local/bin (requires root)")
+	fmt.Println("  gmcore uninstall [--purge [--confirm-purge]]  Uninstall CLI")
 	fmt.Println("")
 	fmt.Println("Usage (local - run from within an app directory):")
-	fmt.Println("  gmcore-cli                        List available commands")
-	fmt.Println("  gmcore-cli <command>              Run app/bundle/SDK command")
+	fmt.Println("  gmcore                                   List available commands")
+	fmt.Println("  gmcore <command>                         Run app/bundle/SDK command")
 	fmt.Println("")
 	fmt.Println("Examples:")
-	fmt.Println("  gmcore-cli create myapp")
-	fmt.Println("  gmcore-cli remove myapp")
-	fmt.Println("  gmcore-cli remove myapp --purge")
-	fmt.Println("  gmcore-cli status")
-	fmt.Println("  gmcore-cli update myapp --target=all --rollback")
-	fmt.Println("  sudo gmcore-cli uninstall --purge --confirm-purge")
-	fmt.Println("")
-	fmt.Println("Local example:")
-	fmt.Println("  cd /opt/gmcore/myapp")
-	fmt.Println("  gmcore-cli cache:clear")
+	fmt.Println("  gmcore app create myapp")
+	fmt.Println("  gmcore app remove myapp --purge")
+	fmt.Println("  gmcore update myapp --target=all --rollback")
+	fmt.Println("  sudo gmcore uninstall --purge --confirm-purge")
+	fmt.Println("  cd <app-directory> && gmcore cache:clear")
 }
 
 func install() error {
@@ -341,7 +342,7 @@ func install() error {
 		return err
 	}
 
-	fmt.Println("Installing gmcore-cli system-wide...")
+	fmt.Println("Installing gmcore system-wide...")
 
 	exePath, err := os.Executable()
 	if err != nil {
@@ -351,12 +352,12 @@ func install() error {
 	var targetPath string
 	switch runtime.GOOS {
 	case "linux":
-		targetPath = "/usr/local/bin/gmcore-cli"
+		targetPath = "/usr/local/bin/gmcore"
 	case "darwin":
-		targetPath = "/usr/local/bin/gmcore-cli"
+		targetPath = "/usr/local/bin/gmcore"
 	case "windows":
-		targetPath = "C:\\Program Files\\gmcore-cli\\gmcore-cli.exe"
-		if err := os.MkdirAll("C:\\Program Files\\gmcore-cli", 0755); err != nil {
+		targetPath = "C:\\Program Files\\gmcore\\gmcore.exe"
+		if err := os.MkdirAll("C:\\Program Files\\gmcore", 0755); err != nil {
 			return fmt.Errorf("failed to create install directory: %w", err)
 		}
 	default:
@@ -386,9 +387,9 @@ func uninstallCLI(purge bool, confirmPurge bool) error {
 	var targetPath string
 	switch runtime.GOOS {
 	case "linux", "darwin":
-		targetPath = "/usr/local/bin/gmcore-cli"
+		targetPath = "/usr/local/bin/gmcore"
 	case "windows":
-		targetPath = "C:\\Program Files\\gmcore-cli\\gmcore-cli.exe"
+		targetPath = "C:\\Program Files\\gmcore\\gmcore.exe"
 	default:
 		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
@@ -412,7 +413,7 @@ func uninstallCLI(purge bool, confirmPurge bool) error {
 			}
 		} else {
 			if os.Getenv("GMCORE_PURGE_CONFIRM") != "1" {
-				fmt.Fprintln(os.Stderr, "Error: --confirm-purge requires GMCORE_PURGE_CONFIRM=1 environment variable")
+				fmt.Fprintln(os.Stderr, "Error: --confirm-purge requires GMCORE_PURGE_CONFIRM=1 env var")
 				return fmt.Errorf("insufficient confirmation")
 			}
 		}
@@ -434,16 +435,13 @@ func uninstallCLI(purge bool, confirmPurge bool) error {
 		return fmt.Errorf("failed to remove binary: %w", err)
 	}
 
-	fmt.Printf("Uninstalled gmcore-cli from %s\n", targetPath)
+	fmt.Printf("Uninstalled gmcore from %s\n", targetPath)
 	return nil
 }
 
 func purgeAllApps() error {
 	basePath := getBasePath()
-	logPath := "/var/log/gmcore-purge.log"
-	if runtime.GOOS == "windows" {
-		logPath = "C:\\ProgramData\\gmcore\\purge.log"
-	}
+	logPath := filepath.Join(basePath, "purge.log")
 
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err == nil {
@@ -500,12 +498,12 @@ func purgeAllApps() error {
 	fmt.Printf("Purged %d application(s).\n", purgeCount)
 
 	if runtime.GOOS == "windows" {
-		programFiles := "C:\\Program Files\\gmcore-cli"
+		programFiles := "C:\\Program Files\\gmcore"
 		os.RemoveAll(programFiles)
 	} else {
-		os.Remove("/usr/local/bin/gmcore-cli")
+		os.Remove("/usr/local/bin/gmcore")
 	}
-	fmt.Println("gmcore-cli has been uninstalled.")
+	fmt.Println("gmcore has been uninstalled.")
 
 	if logFile != nil {
 		fmt.Fprintf(logFile, "[%s] PURGE completed. Purged %d apps\n", time.Now().Format(time.RFC3339), purgeCount)
@@ -543,8 +541,11 @@ func createApp(appName, manifestVersion string) error {
 	basePath := getBasePath()
 	appPath := filepath.Join(basePath, appName)
 
-	if _, err := os.Stat(appPath); err == nil {
-		return fmt.Errorf("application %s already exists at %s", appName, appPath)
+	for _, candidate := range apps.CandidateDirs(appName) {
+		candidatePath := filepath.Join(basePath, candidate)
+		if _, err := os.Stat(candidatePath); err == nil {
+			return fmt.Errorf("application %s already exists at %s", appName, candidatePath)
+		}
 	}
 
 	if err := requireRoot(); err != nil {
@@ -576,7 +577,7 @@ func createApp(appName, manifestVersion string) error {
 	if err := inst.InstallComponent(installer.Component{
 		Repo:    framework.Repo,
 		Release: framework.Release,
-		Path:    framework.Path,
+		Path:    "vendor/framework",
 	}); err != nil {
 		return fmt.Errorf("failed to install framework: %w", err)
 	}
@@ -593,9 +594,10 @@ func createApp(appName, manifestVersion string) error {
 		return fmt.Errorf("failed to install skeleton: %w", err)
 	}
 
+	effectiveSDKs := m.EffectiveSDKs(appName)
 	fmt.Println("")
-	fmt.Printf("Installing %d SDKs...\n", len(m.GetSDKs()))
-	for _, sdk := range m.GetSDKs() {
+	fmt.Printf("Installing %d SDKs...\n", len(effectiveSDKs))
+	for _, sdk := range effectiveSDKs {
 		fmt.Printf("  - %s (%s)\n", sdk.Name, sdk.Release)
 		if err := inst.InstallComponent(installer.Component{
 			Repo:    "gmcorenet/" + sdk.Name,
@@ -624,6 +626,10 @@ func createApp(appName, manifestVersion string) error {
 		fmt.Fprintf(os.Stderr, "Warning: post-create setup failed: %v\n", err)
 	}
 
+	if err := ensureExposureAndTransportDefaults(appPath, appName); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to write exposure defaults: %v\n", err)
+	}
+
 	if runtime.GOOS == "windows" {
 		fmt.Printf("Creating Windows service for %s...\n", appName)
 		if err := createWindowsService(appName, appPath); err != nil {
@@ -638,7 +644,8 @@ func createApp(appName, manifestVersion string) error {
 	fmt.Printf("  cd %s\n", appPath)
 	fmt.Println("  go mod tidy")
 	fmt.Println("  go build -o bin/myapp cmd/server/main.go")
-	fmt.Println("  gmcore status", appName)
+	fmt.Printf("  gmcore status %s\n", appName)
+	fmt.Printf("  gmcore start %s\n", appName)
 
 	return nil
 }
@@ -728,11 +735,13 @@ func removeApp(appName string, purge bool) error {
 		return fmt.Errorf("removing an app %s", err)
 	}
 
-	appPath := filepath.Join(getBasePath(), appName)
-
-	if _, err := os.Stat(appPath); os.IsNotExist(err) {
-		return fmt.Errorf("application %s does not exist at %s", appName, appPath)
+	entry, err := apps.ResolveByName(getBasePath(), appName)
+	if err != nil {
+		return err
 	}
+
+	appPath := entry.Path
+	appName = entry.Name
 
 	fmt.Printf("Stopping %s...\n", appName)
 	stopApp(appName)
@@ -838,96 +847,79 @@ func removeAppUser(appName string) error {
 }
 
 func listApps() error {
-	basePath := getBasePath()
-
-	entries, err := os.ReadDir(basePath)
+	entries, err := apps.List(getBasePath())
 	if err != nil {
-		if os.IsNotExist(err) {
-			fmt.Println("No applications installed")
-			return nil
-		}
-		return fmt.Errorf("failed to read directory: %w", err)
+		return fmt.Errorf("failed to list apps: %w", err)
 	}
 
 	fmt.Println("Installed applications:")
 	fmt.Println("")
 
-	hasApps := false
-	for _, entry := range entries {
-		if entry.IsDir() && strings.HasPrefix(entry.Name(), "gmcore-") {
-			appName := strings.TrimPrefix(entry.Name(), "gmcore-")
-			hasApps = true
-			fmt.Printf("  %s\n", appName)
-		}
+	if len(entries) == 0 {
+		fmt.Println("  (none)")
+		return nil
 	}
 
-	if !hasApps {
-		fmt.Println("  (none)")
+	for _, entry := range entries {
+		fmt.Printf("  %s\n", entry.Name)
 	}
 
 	return nil
 }
 
 func statusApps(appName string) error {
-	basePath := "/opt/gmcore"
-
 	if appName != "" {
 		return statusSingleApp(appName)
 	}
 
-	entries, err := os.ReadDir(basePath)
+	entries, err := apps.List(getBasePath())
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("failed to read directory: %w", err)
+		return fmt.Errorf("failed to list applications: %w", err)
 	}
 
 	fmt.Println("Application status:")
 	fmt.Println("")
 
 	for _, entry := range entries {
-		if entry.IsDir() && strings.HasPrefix(entry.Name(), "gmcore-") {
-			appName := strings.TrimPrefix(entry.Name(), "gmcore-")
-			printAppStatus(appName)
-		}
+		printAppStatus(entry)
 	}
 
 	return nil
 }
 
 func statusSingleApp(appName string) error {
-	appPath := filepath.Join(getBasePath(), appName)
-
-	if _, err := os.Stat(appPath); os.IsNotExist(err) {
-		return fmt.Errorf("application %s does not exist", appName)
+	entry, err := apps.ResolveByName(getBasePath(), appName)
+	if err != nil {
+		return err
 	}
 
-	printAppStatus(appName)
+	printAppStatus(entry)
 	return nil
 }
 
-func printAppStatus(appName string) {
-	userName := "gmcore-" + appName
-
-	isRunning := false
-	switch runtime.GOOS {
-	case "linux", "darwin":
-		cmd := exec.Command("pgrep", "-u", userName)
-		err := cmd.Run()
-		isRunning = err == nil
-	case "windows":
-		cmd := exec.Command("tasklist", "/FI", "USERNAME eq "+userName)
-		output, _ := cmd.Output()
-		isRunning = !strings.Contains(string(output), "INFO: No tasks are running")
-	}
-
+func printAppStatus(entry apps.Entry) {
+	running, pid, err := pidStatus(entry.Path)
 	status := "stopped"
-	if isRunning {
+	if err != nil {
+		status = "unknown"
+	}
+	if !running && processRunningForAppUser(entry.Name) {
+		running = true
+	}
+	if running {
 		status = "running"
 	}
 
-	fmt.Printf("  %s - %s\n", appName, status)
+	exposureMode := readExposureMode(entry.Path)
+	if running && pid > 0 {
+		fmt.Printf("  %s - %s (pid=%d, exposure=%s)\n", entry.Name, status, pid, exposureMode)
+		return
+	}
+	if running {
+		fmt.Printf("  %s - %s (exposure=%s)\n", entry.Name, status, exposureMode)
+		return
+	}
+	fmt.Printf("  %s - %s (exposure=%s)\n", entry.Name, status, exposureMode)
 }
 
 func selfUpdate(targetVersion string) error {
@@ -1008,7 +1000,7 @@ func getLatestRelease() (string, error) {
 }
 
 func getPlatform() string {
-	switch strings.ToLower(os.Getenv("GOOS")) {
+	switch runtime.GOOS {
 	case "windows":
 		return "windows"
 	case "darwin":
@@ -1019,7 +1011,7 @@ func getPlatform() string {
 }
 
 func getArch() string {
-	switch strings.ToLower(os.Getenv("GOARCH")) {
+	switch runtime.GOARCH {
 	case "arm64":
 		return "arm64"
 	default:
@@ -1033,9 +1025,16 @@ func postCreateSetup(appPath string) error {
 		return nil
 	}
 
-	cmd := exec.Command("go", "mod", "tidy")
+	cmd := exec.Command("go", "mod", "edit", "-replace", "github.com/gmcorenet/framework=./vendor/framework")
 	cmd.Dir = appPath
 	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("go mod edit replace failed: %s", string(output))
+	}
+
+	cmd = exec.Command("go", "mod", "tidy")
+	cmd.Dir = appPath
+	output, err = cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("go mod tidy failed: %s", string(output))
 	}
@@ -1101,12 +1100,7 @@ func getUserID(username string) int {
 }
 
 func getBasePath() string {
-	switch runtime.GOOS {
-	case "windows":
-		return "C:\\ProgramData\\gmcore"
-	default:
-		return "/opt/gmcore"
-	}
+	return apps.BasePath()
 }
 
 func getGoVersion() string {
@@ -1124,9 +1118,25 @@ func getGoVersion() string {
 	return "1.21"
 }
 
+func toCamelCaseTitle(s string) string {
+	if len(s) == 0 {
+		return s
+	}
+	parts := strings.Split(s, "-")
+	for i := range parts {
+		if len(parts[i]) > 0 {
+			parts[i] = strings.ToUpper(parts[i][:1]) + strings.ToLower(parts[i][1:])
+		}
+	}
+	return strings.Join(parts, "")
+}
+
 func requireRoot() error {
 	switch runtime.GOOS {
 	case "windows":
+		if !isWindowsAdmin() {
+			return fmt.Errorf("requires administrator privileges. Run as administrator")
+		}
 		return nil
 	default:
 		if os.Getuid() != 0 {
@@ -1134,6 +1144,10 @@ func requireRoot() error {
 		}
 	}
 	return nil
+}
+
+func isWindowsAdmin() bool {
+	return exec.Command("net", "session").Run() == nil
 }
 
 func getGroupID(groupname string) int {
@@ -1282,7 +1296,7 @@ func New() *%s {
 func (b *%s) Run() error {
 	return nil
 }
-`, name, strings.Title(name), name, name, name)
+`, name, toCamelCaseTitle(name), name, name, name)
 	componentPath := filepath.Join(folder, "internal", name, name+".go")
 	if err := os.WriteFile(componentPath, []byte(componentGo), 0644); err != nil {
 		return fmt.Errorf("failed to create component.go: %w", err)
@@ -1356,7 +1370,7 @@ func handleBundleInstall(args []string) {
 func handleUpdate(args []string) {
 	target := update.TargetAll
 	version := "latest"
-	appPath := ""
+	appName := ""
 	rollback := false
 	verbose := false
 	force := false
@@ -1384,13 +1398,12 @@ func handleUpdate(args []string) {
 		} else if strings.HasPrefix(arg, "--version=") {
 			version = strings.TrimPrefix(arg, "--version=")
 		} else if strings.HasPrefix(arg, "--app=") {
-			appPath = strings.TrimPrefix(arg, "--app=")
-			appPath = filepath.Join(getBasePath(), "gmcore-"+appPath)
-		} else if strings.HasPrefix(arg, "--rollback") {
+			appName = strings.TrimPrefix(arg, "--app=")
+		} else if arg == "--rollback" {
 			rollback = true
-		} else if strings.HasPrefix(arg, "--verbose") || arg == "-v" {
+		} else if arg == "--verbose" || arg == "-v" {
 			verbose = true
-		} else if strings.HasPrefix(arg, "--force") || arg == "-f" {
+		} else if arg == "--force" || arg == "-f" {
 			force = true
 		} else if strings.HasPrefix(arg, "--sdk=") {
 			sdkName := strings.TrimPrefix(arg, "--sdk=")
@@ -1398,8 +1411,8 @@ func handleUpdate(args []string) {
 		} else if arg == "--help" || arg == "-h" {
 			printUpdateUsage()
 			os.Exit(0)
-		} else if !strings.HasPrefix(arg, "--") && appPath == "" {
-			appPath = filepath.Join(getBasePath(), "gmcore-"+arg)
+		} else if !strings.HasPrefix(arg, "--") && appName == "" {
+			appName = arg
 		}
 	}
 
@@ -1407,7 +1420,7 @@ func handleUpdate(args []string) {
 		Target:   target,
 		Version:  version,
 		SDKs:     sdks,
-		AppName:  appPath,
+		AppName:  appName,
 		Rollback: rollback,
 		Verbose:  verbose,
 		Force:    force,
@@ -1421,31 +1434,34 @@ func handleUpdate(args []string) {
 }
 
 func printUpdateUsage() {
-	fmt.Println("gmcore-cli update - Update framework, SDKs, and skeleton")
+	fmt.Println("gmcore update - Update framework, SDKs, and skeleton")
 	fmt.Println("")
 	fmt.Println("Usage:")
-	fmt.Println("  gmcore-cli update [app] [flags]")
+	fmt.Println("  gmcore update [app] [flags]")
 	fmt.Println("  (if app is omitted, uses current directory if inside an app)")
+
+
+
+
 	fmt.Println("")
 	fmt.Println("Flags:")
 	fmt.Println("  --target=<target>    Target to update: framework, sdks, skeleton, app, all (default: all)")
 	fmt.Println("  --version=<version> Version to install (default: latest)")
 	fmt.Println("  --app=<name>       Application name (optional if run from app directory)")
 	fmt.Println("  --sdk=<name>        Specific SDK to update (can be used multiple times)")
-	fmt.Println("  --rollback         Rollback on failure (saves backup to /var/gmcore-<app>/backups/)")
+	fmt.Println("  --rollback         Rollback on failure (saves backup to <app>/var/backups/)")
 	fmt.Println("  --force, -f        Force merge of protected files (skip confirmation)")
 	fmt.Println("  --verbose, -v       Verbose output")
 	fmt.Println("  --help, -h          Show this help")
 	fmt.Println("")
 	fmt.Println("Examples:")
-	fmt.Println("  gmcore-cli update                          # update current app (if in app dir)")
-	fmt.Println("  gmcore-cli update myapp                    # update specific app")
-	fmt.Println("  gmcore-cli update --target=framework --version=v1.0.0")
-	fmt.Println("  gmcore-cli update myapp --target=sdks --sdk=gmcore-orm --sdk=gmcore-log")
-	fmt.Println("  gmcore-cli update myapp --target=skeleton --force  # merge protected files")
-	fmt.Println("  gmcore-cli update myapp --target=all --rollback --verbose")
+	fmt.Println("  gmcore update                          # update current app (if in app dir)")
+	fmt.Println("  gmcore update myapp                    # update specific app")
+	fmt.Println("  gmcore update --target=framework --version=v1.0.0")
+	fmt.Println("  gmcore update myapp --target=sdks --sdk=gmcore-orm --sdk=gmcore-log")
+	fmt.Println("  gmcore update myapp --target=skeleton --force  # merge protected files")
+	fmt.Println("  gmcore update myapp --target=all --rollback --verbose")
 	fmt.Println("")
 	fmt.Println("Rollback backups are stored at:")
-	fmt.Println("  /var/gmcore-<app>/backups/<target>_<version>_<timestamp>.tar.gz")
+	fmt.Println("  <app-directory>/var/backups/<target>_<version>_<timestamp>.tar.gz")
 }
-

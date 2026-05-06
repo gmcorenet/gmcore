@@ -7,10 +7,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
+	"github.com/gmcorenet/gmcore/internal/apps"
 	"github.com/gmcorenet/gmcore/internal/installer"
 	"github.com/gmcorenet/gmcore/internal/manifest"
 )
@@ -19,10 +19,10 @@ type UpdateTarget string
 
 const (
 	TargetFramework UpdateTarget = "framework"
-	TargetSDKs     UpdateTarget = "sdks"
-	TargetSkeleton UpdateTarget = "skeleton"
-	TargetApp     UpdateTarget = "app"
-	TargetAll     UpdateTarget = "all"
+	TargetSDKs      UpdateTarget = "sdks"
+	TargetSkeleton  UpdateTarget = "skeleton"
+	TargetApp       UpdateTarget = "app"
+	TargetAll       UpdateTarget = "all"
 )
 
 type UpdateOptions struct {
@@ -58,64 +58,28 @@ func NewUpdateManager(opts *UpdateOptions) *UpdateManager {
 	m := &UpdateManager{
 		opts:     opts,
 		results:  make([]UpdateResult, 0),
-		basePath: getBasePath(),
+		basePath: apps.BasePath(),
 	}
 
 	if opts.AppName != "" {
-		m.appPath = filepath.Join(m.basePath, "gmcore-"+opts.AppName)
-		m.appName = opts.AppName
+		resolved, err := apps.ResolveByName(m.basePath, opts.AppName)
+		if err == nil {
+			m.appPath = resolved.Path
+			m.appName = resolved.Name
+		} else {
+			m.appPath = filepath.Join(m.basePath, opts.AppName)
+			m.appName = apps.NormalizeName(opts.AppName)
+		}
 	} else if detected := detectAppRoot(); detected != "" {
 		m.appPath = detected
-		parts := strings.Split(filepath.Base(detected), "-")
-		if len(parts) >= 2 && parts[0] == "gmcore" {
-			m.appName = strings.Join(parts[1:], "-")
-		}
+		m.appName = apps.NormalizeName(filepath.Base(detected))
 	}
 
 	return m
 }
 
 func detectAppRoot() string {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-
-	basePath := getBasePath()
-	cwdNormalized := filepath.ToSlash(cwd)
-	basePathNormalized := filepath.ToSlash(basePath)
-
-	if !strings.HasPrefix(cwdNormalized, basePathNormalized) {
-		return ""
-	}
-
-	relative := strings.TrimPrefix(cwdNormalized, basePathNormalized)
-	relative = strings.TrimPrefix(relative, "/")
-
-	if relative == "" || relative == "." {
-		return ""
-	}
-
-	if strings.Contains(relative, "..") {
-		return ""
-	}
-
-	parts := strings.SplitN(relative, "/", 2)
-	if len(parts) < 1 || parts[0] == "" {
-		return ""
-	}
-
-	appName := parts[0]
-	if !strings.HasPrefix(appName, "gmcore-") {
-		return ""
-	}
-
-	appRoot := filepath.Join(basePath, appName)
-	if _, err := os.Stat(appRoot); err != nil {
-		return ""
-	}
-
-	return appRoot
+	return apps.DetectFromCWD(apps.BasePath(), "")
 }
 
 func (m *UpdateManager) Run() error {
@@ -198,7 +162,7 @@ func (m *UpdateManager) updateTarget(target UpdateTarget) UpdateResult {
 }
 
 func (m *UpdateManager) getBackupDir() string {
-	varDir := filepath.Join("/var", "gmcore-"+m.appName, "backups")
+	varDir := filepath.Join(m.appPath, "var", "backups")
 	os.MkdirAll(varDir, 0755)
 	return varDir
 }
@@ -283,17 +247,18 @@ func (m *UpdateManager) updateFramework() UpdateResult {
 
 func (m *UpdateManager) updateSDKs() UpdateResult {
 	result := UpdateResult{Target: TargetSDKs}
+	effectiveSDKs := m.mf.EffectiveSDKs(m.appName)
 
 	sdksToUpdate := m.opts.SDKs
 	if len(sdksToUpdate) == 0 {
-		for _, sdk := range m.mf.GetSDKs() {
+		for _, sdk := range effectiveSDKs {
 			sdksToUpdate = append(sdksToUpdate, sdk.Name)
 		}
 	}
 
 	result.From = "previous"
-	if len(m.mf.GetSDKs()) > 0 {
-		result.To = m.mf.GetSDKs()[0].Release
+	if len(effectiveSDKs) > 0 {
+		result.To = effectiveSDKs[0].Release
 	} else {
 		result.To = "unknown"
 	}
@@ -320,7 +285,7 @@ func (m *UpdateManager) updateSDKs() UpdateResult {
 	for _, sdkName := range sdksToUpdate {
 		var sdkRelease string
 
-		for _, sdk := range m.mf.GetSDKs() {
+		for _, sdk := range effectiveSDKs {
 			if sdk.Name == sdkName {
 				sdkRelease = sdk.Release
 				break
@@ -393,7 +358,8 @@ func (m *UpdateManager) updateSkeleton() UpdateResult {
 		Repo:    skeleton.Repo,
 		Release: skeleton.Release,
 		Path:    skeletonPath,
-	}, m.opts.Verbose, m.opts.Force); err != nil {
+	}, m.opts.Verbose, m.opts.Force)
+	if err != nil {
 		result.Error = err
 		return result
 	}
@@ -526,12 +492,7 @@ func (m *UpdateManager) printSummary() error {
 }
 
 func getBasePath() string {
-	switch runtime.GOOS {
-	case "windows":
-		return "C:\\ProgramData\\gmcore"
-	default:
-		return "/opt/gmcore"
-	}
+	return apps.BasePath()
 }
 
 func createTarGz(sourcePath, destPath string) error {
@@ -607,6 +568,10 @@ func extractTarGz(tarballPath, destPath string) error {
 		}
 
 		target := filepath.Join(destPath, header.Name)
+
+		if !strings.HasPrefix(filepath.Clean(target), filepath.Clean(destPath)+string(os.PathSeparator)) && target != filepath.Clean(destPath) {
+			return fmt.Errorf("path traversal detected: %s", header.Name)
+		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:
