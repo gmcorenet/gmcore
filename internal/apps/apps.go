@@ -93,8 +93,7 @@ func LooksLikeAppRoot(path string) bool {
 	}
 
 	markers := []string{
-		filepath.Join(path, "app.yaml"),
-		filepath.Join(path, "current", "app.yaml"),
+		filepath.Join(path, "manifest.yaml"),
 		filepath.Join(path, "config"),
 		filepath.Join(path, "bin"),
 	}

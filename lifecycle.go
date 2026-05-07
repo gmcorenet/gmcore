@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gmcorenet/gmcore/internal/apps"
+	gmcore_transport "github.com/gmcorenet/sdk-gmcore-transport"
 	"gopkg.in/yaml.v3"
 )
 
@@ -628,4 +629,203 @@ tmp_dir = "var/tmp"
 		"GMCORE_APP_NAME="+entry.Name,
 	)
 	return cmd.Run()
+}
+
+func generatePairCode(appName string) error {
+	basePath := getBasePath()
+	entry, err := apps.ResolveByName(basePath, appName)
+	if err != nil {
+		return err
+	}
+
+	network, addr, err := resolveTransportEndpoint(entry)
+	if err != nil {
+		return fmt.Errorf("failed to resolve transport endpoint for %s: %w", appName, err)
+	}
+
+	conn, err := net.DialTimeout(network, addr, 2*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to connect to %s: %w", appName, err)
+	}
+	defer conn.Close()
+
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	msg := transportMessage{Type: "pair_generate", Timestamp: time.Now().Unix()}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+
+	if _, err := conn.Write(data); err != nil {
+		return fmt.Errorf("failed to send pair_generate: %w", err)
+	}
+
+	respData := make([]byte, 64*1024)
+	n, err := conn.Read(respData)
+	if err != nil {
+		return fmt.Errorf("failed to read pair_generate response: %w", err)
+	}
+	if n == 0 {
+		return errors.New("empty pair_generate response")
+	}
+
+	var resp struct {
+		Success bool   `json:"success"`
+		Status  string `json:"status"`
+		Error   string `json:"error,omitempty"`
+		Data    struct {
+			Code string `json:"code"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respData[:n], &resp); err != nil {
+		return fmt.Errorf("failed to parse pair_generate response: %w", err)
+	}
+	if !resp.Success {
+		if resp.Error != "" {
+			return errors.New(resp.Error)
+		}
+		return fmt.Errorf("pair_generate failed with status=%s", resp.Status)
+	}
+	if resp.Data.Code == "" {
+		return errors.New("pair_generate returned empty code")
+	}
+
+	fmt.Printf("Pairing code for %s: %s\n", appName, resp.Data.Code)
+	return nil
+}
+
+func pairWithCode(master, client, code, host string) error {
+	basePath := getBasePath()
+
+	masterEntry, err := apps.ResolveByName(basePath, master)
+	if err != nil {
+		return err
+	}
+	clientEntry, err := apps.ResolveByName(basePath, client)
+	if err != nil {
+		return err
+	}
+
+	network, addr, err := resolveTransportEndpoint(masterEntry)
+	if err != nil {
+		return fmt.Errorf("failed to resolve transport endpoint for %s: %w", master, err)
+	}
+
+	if host != "" && network == "tcp" {
+		_, port, splitErr := net.SplitHostPort(addr)
+		if splitErr == nil && port != "" {
+			addr = net.JoinHostPort(host, port)
+		}
+	}
+
+	conn, err := net.DialTimeout(network, addr, 2*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to connect to %s: %w", master, err)
+	}
+	defer conn.Close()
+
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	payload, _ := json.Marshal(map[string]string{
+		"code":   code,
+		"client": client,
+	})
+	msg := transportMessage{
+		Type:      "pair_accept",
+		Body:      payload,
+		Timestamp: time.Now().Unix(),
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+
+	if _, err := conn.Write(data); err != nil {
+		return fmt.Errorf("failed to send pair_accept: %w", err)
+	}
+
+	respData := make([]byte, 64*1024)
+	n, err := conn.Read(respData)
+	if err != nil {
+		return fmt.Errorf("failed to read pair_accept response: %w", err)
+	}
+	if n == 0 {
+		return errors.New("empty pair_accept response")
+	}
+
+	var resp struct {
+		Success bool   `json:"success"`
+		Status  string `json:"status"`
+		Error   string `json:"error,omitempty"`
+		Data    struct {
+			Secret string `json:"secret"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respData[:n], &resp); err != nil {
+		return fmt.Errorf("failed to parse pair_accept response: %w", err)
+	}
+	if !resp.Success {
+		if resp.Error != "" {
+			return errors.New(resp.Error)
+		}
+		return fmt.Errorf("pair_accept failed with status=%s", resp.Status)
+	}
+
+	serverAddr := host
+	if serverAddr == "" {
+		serverAddr = master
+	}
+
+	socketPath := filepath.Join(masterEntry.Path, "var", "socket", master+".sock")
+
+	pairingInfo := gmcore_transport.PairingInfo{
+		AppID:       client,
+		GatewayID:   master,
+		GatewayAddr: serverAddr,
+		SocketPath:  socketPath,
+		Secret:      []byte(resp.Data.Secret),
+		PairedAt:    time.Now().Unix(),
+	}
+
+	keysDir := filepath.Join(clientEntry.Path, "var", "keys")
+	if err := os.MkdirAll(keysDir, 0700); err != nil {
+		return fmt.Errorf("failed to create keys directory: %w", err)
+	}
+
+	pairingData, err := json.Marshal(pairingInfo)
+	if err != nil {
+		return fmt.Errorf("failed to marshal pairing info: %w", err)
+	}
+
+	pairingPath := filepath.Join(keysDir, "pairing.json")
+	if err := os.WriteFile(pairingPath, pairingData, 0600); err != nil {
+		return fmt.Errorf("failed to write pairing.json: %w", err)
+	}
+
+	fmt.Printf("Application %s paired with %s\n", client, master)
+	return nil
+}
+
+func unpairApps(master, client string) error {
+	basePath := getBasePath()
+
+	masterEntry, err := apps.ResolveByName(basePath, master)
+	if err != nil {
+		return err
+	}
+	clientEntry, err := apps.ResolveByName(basePath, client)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range []apps.Entry{masterEntry, clientEntry} {
+		pairingPath := filepath.Join(entry.Path, "var", "keys", "pairing.json")
+		if err := os.Remove(pairingPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to remove pairing for %s: %w", entry.Name, err)
+		}
+	}
+
+	fmt.Printf("Unpaired %s and %s\n", master, client)
+	return nil
 }

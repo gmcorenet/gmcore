@@ -21,7 +21,7 @@ import (
 	"github.com/gmcorenet/gmcore/internal/sdk"
 	"github.com/gmcorenet/gmcore/internal/update"
 	"github.com/gmcorenet/gmcore/internal/version"
-	gmcore_maker "github.com/gmcorenet/sdk-gmcore-maker"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -121,7 +121,7 @@ func main() {
 
 func handleAppScope(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: gmcore app <create|remove|list|status|start|stop|restart|reload|worker|migrate|scheduler|versions>")
+		fmt.Fprintln(os.Stderr, "Usage: gmcore app <create|remove|list|status|start|stop|restart|reload|worker|migrate|scheduler|versions|pair|unpair>")
 		os.Exit(1)
 	}
 
@@ -216,9 +216,75 @@ func handleAppScope(args []string) {
 			os.Exit(1)
 		}
 
+	case "pair":
+		master := ""
+		client := ""
+		code := ""
+		host := ""
+		generate := false
+		for _, a := range rest {
+			if strings.HasPrefix(a, "--master=") {
+				master = strings.TrimPrefix(a, "--master=")
+			} else if strings.HasPrefix(a, "--client=") {
+				client = strings.TrimPrefix(a, "--client=")
+			} else if strings.HasPrefix(a, "--code=") {
+				code = strings.TrimPrefix(a, "--code=")
+			} else if strings.HasPrefix(a, "--host=") {
+				host = strings.TrimPrefix(a, "--host=")
+			} else if a == "--generate" {
+				generate = true
+			}
+		}
+
+		if generate {
+			target := master
+			if target == "" {
+				target = client
+			}
+			if target == "" {
+				fmt.Fprintln(os.Stderr, "Usage: gmcore app pair --generate --master <app>")
+				os.Exit(1)
+			}
+			if err := generatePairCode(target); err != nil {
+				fmt.Fprintln(os.Stderr, "Error:", err)
+				os.Exit(1)
+			}
+			return
+		}
+
+		if master == "" || client == "" {
+			fmt.Fprintln(os.Stderr, "Usage:")
+			fmt.Fprintln(os.Stderr, "  gmcore app pair --generate --master <app>")
+			fmt.Fprintln(os.Stderr, "  gmcore app pair --master <app> --client <app> --code XXXX [--host IP]")
+			os.Exit(1)
+		}
+		if err := pairWithCode(master, client, code, host); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+
+	case "unpair":
+		master := ""
+		client := ""
+		for _, a := range rest {
+			if strings.HasPrefix(a, "--master=") {
+				master = strings.TrimPrefix(a, "--master=")
+			} else if strings.HasPrefix(a, "--client=") {
+				client = strings.TrimPrefix(a, "--client=")
+			}
+		}
+		if master == "" || client == "" {
+			fmt.Fprintln(os.Stderr, "Usage: gmcore app unpair --master <app> --client <app>")
+			os.Exit(1)
+		}
+		if err := unpairApps(master, client); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown app command: %s\n", subcmd)
-		fmt.Fprintln(os.Stderr, "Usage: gmcore app <create|remove|list|status|start|stop|restart|reload|worker|migrate|scheduler|versions>")
+		fmt.Fprintln(os.Stderr, "Usage: gmcore app <create|remove|list|status|start|stop|restart|reload|worker|migrate|scheduler|versions|pair|unpair>")
 		os.Exit(1)
 	}
 }
@@ -390,6 +456,10 @@ func printUsage() {
 	fmt.Println("  gmcore app migrate <appname> [--rollback] Run/rollback migrations (thin wrapper)")
 	fmt.Println("  gmcore app scheduler <appname>           Start scheduler daemon (thin wrapper)")
 	fmt.Println("  gmcore app versions                      List available framework versions")
+	fmt.Println("  gmcore app pair --generate --master <app>  Generate pairing code for an app")
+	fmt.Println("  gmcore app pair --master <app> --client <app> --code XXXX [--host IP]")
+	fmt.Println("                                                    Accept pairing code and pair two apps")
+	fmt.Println("  gmcore app unpair --master <app> --client <app>   Unpair two applications")
 	fmt.Println("")
 	fmt.Println("  gmcore bundle make <name>                Create a new bundle scaffold")
 	fmt.Println("  gmcore bundle install <name>             Install a bundle from the registry")
@@ -442,6 +512,13 @@ func install() error {
 
 	fmt.Println("Installing gmcore system-wide...")
 
+	if err := ensureGMCoreGroup(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to ensure gmcore group: %v\n", err)
+	}
+	if err := ensureGMCoreUser(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to ensure gmcore user: %v\n", err)
+	}
+
 	exePath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to find current executable: %w", err)
@@ -467,8 +544,19 @@ func install() error {
 	}
 
 	if runtime.GOOS != "windows" {
-		if err := os.Chmod(targetPath, 0755); err != nil {
+		if err := os.Chmod(targetPath, 0750); err != nil {
 			return fmt.Errorf("failed to set permissions: %w", err)
+		}
+		gmcoreUID := getUID("gmcore")
+		gmcoreGID := getGID("gmcore")
+		if gmcoreUID > 0 && gmcoreGID > 0 {
+			if err := os.Chown(targetPath, gmcoreUID, gmcoreGID); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to set binary ownership: %v\n", err)
+			}
+		} else {
+			if err := os.Chown(targetPath, os.Getuid(), getGID("gmcore")); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to set binary ownership: %v\n", err)
+			}
 		}
 	}
 
@@ -764,12 +852,12 @@ func createAppUser(appName string) error {
 }
 
 func createUserLinux(userName string) error {
-	groupCmd := exec.Command("groupadd", "-f", "gmcore")
+	groupCmd := exec.Command("groupadd", "-f", userName)
 	if output, err := groupCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("groupadd failed: %s", string(output))
 	}
 
-	userCmd := exec.Command("useradd", "-M", "-s", "/usr/sbin/nologin", "-g", "gmcore", userName)
+	userCmd := exec.Command("useradd", "-M", "-s", "/usr/sbin/nologin", "-g", userName, userName)
 	if output, err := userCmd.CombinedOutput(); err != nil {
 		if strings.Contains(string(output), "already exists") {
 			return nil
@@ -781,11 +869,11 @@ func createUserLinux(userName string) error {
 }
 
 func createUserMacOS(userName string) error {
-	if err := exec.Command("dscl", ".", "-create", "/Groups/gmcore").Run(); err != nil {
+	if err := exec.Command("dscl", ".", "-create", "/Groups/"+userName).Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: dscl group creation: %v\n", err)
 	}
 
-	groupCmd := exec.Command("dscl", ".", "-append", "/Groups/gmcore", "GroupMembership", userName)
+	groupCmd := exec.Command("dscl", ".", "-append", "/Groups/"+userName, "GroupMembership", userName)
 	if err := groupCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: dscl group membership: %v\n", err)
 	}
@@ -1368,6 +1456,90 @@ func requireRoot() error {
 	return nil
 }
 
+func ensureGMCoreGroup() error {
+	switch runtime.GOOS {
+	case "linux":
+		checkCmd := exec.Command("getent", "group", "gmcore")
+		if checkCmd.Run() == nil {
+			return nil
+		}
+		cmd := exec.Command("groupadd", "-f", "gmcore")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("groupadd gmcore failed: %s", string(output))
+		}
+		return nil
+	case "darwin":
+		checkCmd := exec.Command("dscl", ".", "-read", "/Groups/gmcore")
+		if checkCmd.Run() == nil {
+			return nil
+		}
+		cmd := exec.Command("dscl", ".", "-create", "/Groups/gmcore")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("dscl create group failed: %s", string(output))
+		}
+		return nil
+	case "windows":
+		checkCmd := exec.Command("net", "localgroup", "gmcore")
+		if checkCmd.Run() == nil {
+			return nil
+		}
+		cmd := exec.Command("net", "localgroup", "gmcore", "/add")
+		output, err := cmd.CombinedOutput()
+		if err != nil && !strings.Contains(string(output), "already exists") {
+			return fmt.Errorf("net localgroup gmcore failed: %s", string(output))
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
+	}
+}
+
+func ensureGMCoreUser() error {
+	switch runtime.GOOS {
+	case "linux":
+		checkCmd := exec.Command("id", "-u", "gmcore")
+		if checkCmd.Run() == nil {
+			return nil
+		}
+		cmd := exec.Command("useradd", "-M", "-s", "/usr/sbin/nologin", "-g", "gmcore", "gmcore")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			if strings.Contains(string(output), "already exists") {
+				return nil
+			}
+			return fmt.Errorf("useradd gmcore failed: %s", string(output))
+		}
+		return nil
+	case "darwin":
+		checkCmd := exec.Command("id", "-u", "gmcore")
+		if checkCmd.Run() == nil {
+			return nil
+		}
+		output, err := exec.Command("sysadminctl", "-addUser", "gmcore", "-shell", "/usr/bin/false", "-n", "gmcore").CombinedOutput()
+		if err != nil {
+			if strings.Contains(string(output), "already exists") {
+				return nil
+			}
+			return fmt.Errorf("sysadminctl gmcore user failed: %s", string(output))
+		}
+		exec.Command("dscl", ".", "-append", "/Groups/gmcore", "GroupMembership", "gmcore").Run()
+		return nil
+	case "windows":
+		checkCmd := exec.Command("net", "user", "gmcore")
+		if checkCmd.Run() == nil {
+			return nil
+		}
+		output, err := exec.Command("net", "user", "gmcore", "/add", "/active:no").CombinedOutput()
+		if err != nil && !strings.Contains(string(output), "already exists") {
+			return fmt.Errorf("net user gmcore failed: %s", string(output))
+		}
+		exec.Command("net", "localgroup", "gmcore", "gmcore", "/add").Run()
+		return nil
+	default:
+		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
+	}
+}
+
 func isWindowsAdmin() bool {
 	return exec.Command("net", "session").Run() == nil
 }
@@ -1627,92 +1799,39 @@ func handleMakeScope(args []string) {
 		os.Exit(1)
 	}
 
-	subcmd := args[0]
-	rest := args[1:]
-
-	cwd, _ := os.Getwd()
-	maker := gmcore_maker.New(cwd)
-
-	switch subcmd {
-	case "controller":
-		if len(rest) < 1 {
-			fmt.Fprintln(os.Stderr, "Usage: gmcore make controller <name>")
-			os.Exit(1)
-		}
-		maker.MakeController(rest[0])
-		fmt.Printf("Controller %q generated\n", rest[0])
-
-	case "entity":
-		if len(rest) < 1 {
-			maker.MakeEntityInteractive()
-			return
-		}
-		if len(rest) == 1 {
-			maker.MakeEntityInteractive()
-			return
-		}
-		maker.MakeEntity(rest[0], rest[1:])
-		fmt.Printf("Entity %q generated\n", rest[0])
-
-	case "form":
-		if len(rest) < 1 {
-			maker.MakeFormInteractive()
-			return
-		}
-		if len(rest) == 1 {
-			maker.MakeFormInteractive()
-			return
-		}
-		maker.MakeForm(rest[0], rest[1:])
-		fmt.Printf("Form %q generated\n", rest[0])
-
-	case "service":
-		if len(rest) < 1 {
-			fmt.Fprintln(os.Stderr, "Usage: gmcore make service <name>")
-			os.Exit(1)
-		}
-		maker.MakeService(rest[0])
-		fmt.Printf("Service %q generated\n", rest[0])
-
-	case "repository":
-		if len(rest) < 2 {
-			fmt.Fprintln(os.Stderr, "Usage: gmcore make repository <name> <entity>")
-			os.Exit(1)
-		}
-		maker.MakeRepository(rest[0], rest[1])
-		fmt.Printf("Repository %q generated\n", rest[0])
-
-	case "migration":
-		if len(rest) < 1 {
-			fmt.Fprintln(os.Stderr, "Usage: gmcore make migration <name>")
-			os.Exit(1)
-		}
-		maker.MakeMigration(rest[0])
-		fmt.Printf("Migration %q generated\n", rest[0])
-
-	default:
-		fmt.Fprintf(os.Stderr, "Unknown make subcommand: %s\n", subcmd)
-		fmt.Fprintln(os.Stderr, "Available: controller, entity, form, service, repository, migration")
+	appRoot := detectAppRoot()
+	if appRoot == "" {
+		fmt.Fprintln(os.Stderr, "Error: make commands require an app directory")
+		fmt.Fprintln(os.Stderr, "Run 'gmcore make ...' from within an application directory")
 		os.Exit(1)
 	}
-}
 
-func parseMakeFields(args []string) []gmcore_maker.Field {
-	var fields []gmcore_maker.Field
-	for _, arg := range args {
-		parts := strings.SplitN(arg, ":", 3)
-		if len(parts) >= 2 {
-			field := gmcore_maker.Field{
-				Name: parts[0],
-				Type: parts[1],
-			}
-			if len(parts) == 3 {
-				field.Tag = parts[2]
-			}
-			fields = append(fields, field)
-		}
+	appName := filepath.Base(appRoot)
+	binaryName := appName
+	if runtime.GOOS == "windows" {
+		binaryName += ".exe"
 	}
-	return fields
+	binaryPath := filepath.Join(appRoot, "bin", binaryName)
+
+	if _, err := os.Stat(binaryPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: app binary not found at %s\n", binaryPath)
+		fmt.Fprintf(os.Stderr, "Build the app first: cd %s && go build -o bin/%s ./cmd/\n", appRoot, binaryName)
+		os.Exit(1)
+	}
+
+	cmd := exec.Command(binaryPath, append([]string{"make"}, args...)...)
+	cmd.Dir = appRoot
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(),
+		"GMCORE_APP_ROOT="+appRoot,
+		"GMCORE_APP_NAME="+appName,
+	)
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "make command failed: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func handleUpdate(args []string) {

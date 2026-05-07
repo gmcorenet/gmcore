@@ -57,6 +57,13 @@ func defaultTransportConfig(appName string) string {
 security:
   type: hmac
   key: %%env(TRANSPORT_SECRET)%%
+
+discovery:
+  enabled: true
+  backend: sqlite
+  db_path: var/data/registry.db
+  registry_file: var/data/registry.json
+  self_register: true
 `, appName)
 }
 
