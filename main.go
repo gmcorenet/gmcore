@@ -20,7 +20,7 @@ import (
 	"github.com/gmcorenet/gmcore/internal/manifest"
 	"github.com/gmcorenet/gmcore/internal/update"
 	"github.com/gmcorenet/gmcore/internal/version"
-	gmcore_maker "github.com/gmcorenet/sdk/gmcore-maker"
+	gmcore_maker "github.com/gmcorenet/sdk-gmcore-maker"
 )
 
 const cliVersion = "v0.5.0"
@@ -101,7 +101,7 @@ func main() {
 
 func handleAppScope(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: gmcore app <create|remove|list|status|start|stop|restart|reload|versions>")
+		fmt.Fprintln(os.Stderr, "Usage: gmcore app <create|remove|list|status|start|stop|restart|reload|worker|migrate|scheduler|versions>")
 		os.Exit(1)
 	}
 
@@ -167,6 +167,24 @@ func handleAppScope(args []string) {
 			os.Exit(1)
 		}
 
+	case "worker":
+		if err := handleAppWorkerCommand(rest); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+
+	case "migrate":
+		if err := handleAppMigrateCommand(rest); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+
+	case "scheduler":
+		if err := handleAppSchedulerCommand(rest); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+
 	case "versions":
 		if err := listVersions(); err != nil {
 			fmt.Fprintln(os.Stderr, "Error:", err)
@@ -175,7 +193,7 @@ func handleAppScope(args []string) {
 
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown app command: %s\n", subcmd)
-		fmt.Fprintln(os.Stderr, "Usage: gmcore app <create|remove|list|status|start|stop|restart|reload|versions>")
+		fmt.Fprintln(os.Stderr, "Usage: gmcore app <create|remove|list|status|start|stop|restart|reload|worker|migrate|scheduler|versions>")
 		os.Exit(1)
 	}
 }
@@ -227,6 +245,21 @@ func runAppCommand(appRoot string) error {
 
 	if cmdName == "help" || cmdName == "--help" || cmdName == "-h" {
 		return listAppCommands(appRoot)
+	}
+
+	switch cmdName {
+	case "worker":
+		return runAppModeLocal(appRoot, "worker")
+	case "migrate":
+		mode := "migrate"
+		for _, a := range args[1:] {
+			if a == "--rollback" {
+				mode = "migrate-rollback"
+			}
+		}
+		return runAppModeLocal(appRoot, mode)
+	case "scheduler":
+		return runAppModeLocal(appRoot, "scheduler")
 	}
 
 	binaryName := appName
@@ -286,13 +319,19 @@ func listAppCommands(appRoot string) error {
 	}
 	binaryPath := filepath.Join(appRoot, "bin", binaryName)
 
+	fmt.Println("Built-in commands:")
+	fmt.Println("  worker                    Start messenger worker")
+	fmt.Println("  migrate [--rollback]      Run/rollback migrations")
+	fmt.Println("  scheduler                 Start scheduler daemon")
+	fmt.Println("")
+
 	if _, err := os.Stat(binaryPath); err == nil {
-		fmt.Println("Commands: (via app binary)")
+		fmt.Println("App binary commands: (via app binary)")
 		fmt.Println("  Use app's built-in command system")
 	} else {
 		commandsDir := filepath.Join(appRoot, "bin", "gmcore", "commands")
 		if entries, err := os.ReadDir(commandsDir); err == nil {
-			fmt.Println("Commands:")
+			fmt.Println("Additional commands:")
 			for _, entry := range entries {
 				name := entry.Name()
 				if runtime.GOOS == "windows" && strings.HasSuffix(name, ".sh") {
@@ -301,7 +340,7 @@ func listAppCommands(appRoot string) error {
 				fmt.Printf("  %s\n", name)
 			}
 		} else {
-			fmt.Println("No commands found")
+			fmt.Println("No additional commands found")
 		}
 	}
 	return nil
@@ -319,6 +358,9 @@ func printUsage() {
 	fmt.Println("  gmcore app stop [appname]                Stop an application")
 	fmt.Println("  gmcore app restart [appname]             Restart an application")
 	fmt.Println("  gmcore app reload [appname]              Reload an application")
+	fmt.Println("  gmcore app worker <appname>              Start messenger worker")
+	fmt.Println("  gmcore app migrate <appname> [--rollback] Run/rollback migrations")
+	fmt.Println("  gmcore app scheduler <appname>           Start scheduler daemon")
 	fmt.Println("  gmcore app versions                      List available framework versions")
 	fmt.Println("")
 	fmt.Println("  gmcore bundle make <name>                Create a new bundle scaffold")
@@ -344,6 +386,9 @@ func printUsage() {
 	fmt.Println("Usage (local - run from within an app directory):")
 	fmt.Println("  gmcore                                   List available commands")
 	fmt.Println("  gmcore <command>                         Run app/bundle/SDK command")
+	fmt.Println("  gmcore worker                            Start messenger worker")
+	fmt.Println("  gmcore migrate [--rollback]              Run/rollback migrations")
+	fmt.Println("  gmcore scheduler                         Start scheduler daemon")
 	fmt.Println("")
 	fmt.Println("Examples:")
 	fmt.Println("  gmcore app create myapp")
@@ -1643,14 +1688,14 @@ func createSDKScaffold(sdkName string) error {
 		return fmt.Errorf("failed to create SDK directory: %w", err)
 	}
 
-	goModContent := fmt.Sprintf("module github.com/gmcorenet/sdk/gmcore-%s\n\ngo 1.21\n", sdkName)
+	goModContent := fmt.Sprintf("module github.com/gmcorenet/sdk-gmcore-%s\n\ngo 1.21\n", sdkName)
 	if err := os.WriteFile(filepath.Join(sdkDir, "go.mod"), []byte(goModContent), 0644); err != nil {
 		return err
 	}
 
 	os.WriteFile(filepath.Join(sdkDir, "go.sum"), []byte(""), 0644)
 
-	readmeContent := fmt.Sprintf("# gmcore-%s\n\nGMCore SDK for %s functionality.\n\n## Usage\n\n```go\nimport gmcore_%s \"github.com/gmcorenet/sdk/gmcore-%s\"\n```\n\n## API\n\nSee %s.go for the public API.\n", sdkName, sdkName, sdkName, sdkName, sdkName)
+	readmeContent := fmt.Sprintf("# gmcore-%s\n\nGMCore SDK for %s functionality.\n\n## Usage\n\n```go\nimport gmcore_%s \"github.com/gmcorenet/sdk-gmcore-%s\"\n```\n\n## API\n\nSee %s.go for the public API.\n", sdkName, sdkName, sdkName, sdkName, sdkName)
 	if err := os.WriteFile(filepath.Join(sdkDir, "README.md"), []byte(readmeContent), 0644); err != nil {
 		return err
 	}
@@ -1661,7 +1706,7 @@ func createSDKScaffold(sdkName string) error {
 		return err
 	}
 
-	mainFileContent := fmt.Sprintf("package %s\n\nimport \"github.com/gmcorenet/sdk/gmcore-%s/internal\"\n\nfunc Version() string {\n\treturn internal.Version\n}\n", pkgName, sdkName)
+	mainFileContent := fmt.Sprintf("package %s\n\nimport \"github.com/gmcorenet/sdk-gmcore-%s/internal\"\n\nfunc Version() string {\n\treturn internal.Version\n}\n", pkgName, sdkName)
 	if err := os.WriteFile(filepath.Join(sdkDir, sdkName+".go"), []byte(mainFileContent), 0644); err != nil {
 		return err
 	}
@@ -1695,4 +1740,100 @@ func listSDKs() {
 	if count == 0 {
 		fmt.Println("  (no SDKs found)")
 	}
+}
+
+func handleAppWorkerCommand(args []string) error {
+	appName := ""
+	for _, a := range args {
+		if !strings.HasPrefix(a, "--") && appName == "" {
+			appName = a
+		}
+	}
+	entry, err := resolveLifecycleTarget(appName)
+	if err != nil {
+		return err
+	}
+	return runAppMode(entry, "worker")
+}
+
+func handleAppMigrateCommand(args []string) error {
+	appName := ""
+	rollback := false
+	for _, a := range args {
+		if a == "--rollback" {
+			rollback = true
+		} else if !strings.HasPrefix(a, "--") && appName == "" {
+			appName = a
+		}
+	}
+	entry, err := resolveLifecycleTarget(appName)
+	if err != nil {
+		return err
+	}
+	mode := "migrate"
+	if rollback {
+		mode = "migrate-rollback"
+	}
+	return runAppMode(entry, mode)
+}
+
+func handleAppSchedulerCommand(args []string) error {
+	appName := ""
+	for _, a := range args {
+		if !strings.HasPrefix(a, "--") && appName == "" {
+			appName = a
+		}
+	}
+	entry, err := resolveLifecycleTarget(appName)
+	if err != nil {
+		return err
+	}
+	return runAppMode(entry, "scheduler")
+}
+
+func runAppMode(entry apps.Entry, mode string) error {
+	if err := compileApp(entry); err != nil {
+		return err
+	}
+	binaryPath, err := resolveAppBinary(entry.Path, entry.Name)
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(binaryPath)
+	cmd.Dir = entry.Path
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(),
+		"GMCORE_APP_ROOT="+entry.Path,
+		"GMCORE_APP_NAME="+entry.Name,
+		"GMCORE_MODE="+mode,
+	)
+	return cmd.Run()
+}
+
+func runAppModeLocal(appRoot string, mode string) error {
+	appName := filepath.Base(appRoot)
+	entry := apps.Entry{
+		Name: appName,
+		Path: appRoot,
+	}
+	if err := compileApp(entry); err != nil {
+		return err
+	}
+	binaryPath, err := resolveAppBinary(appRoot, appName)
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(binaryPath)
+	cmd.Dir = appRoot
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(),
+		"GMCORE_APP_ROOT="+appRoot,
+		"GMCORE_APP_NAME="+appName,
+		"GMCORE_MODE="+mode,
+	)
+	return cmd.Run()
 }
