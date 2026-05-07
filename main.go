@@ -20,6 +20,7 @@ import (
 	"github.com/gmcorenet/gmcore/internal/manifest"
 	"github.com/gmcorenet/gmcore/internal/update"
 	"github.com/gmcorenet/gmcore/internal/version"
+	gmcore_maker "github.com/gmcorenet/sdk/gmcore-maker"
 )
 
 const cliVersion = "v0.5.0"
@@ -47,6 +48,12 @@ func main() {
 
 	case "bundle":
 		handleBundleScope(os.Args[2:])
+
+	case "sdk":
+		handleSDKScope(os.Args[2:])
+
+	case "make":
+		handleMakeScope(os.Args[2:])
 
 	case "self-update":
 		targetVersion := ""
@@ -317,6 +324,15 @@ func printUsage() {
 	fmt.Println("  gmcore bundle make <name>                Create a new bundle scaffold")
 	fmt.Println("  gmcore bundle install <name>             Install a bundle from the registry")
 	fmt.Println("  gmcore bundle list                       List available bundles")
+	fmt.Println("")
+	fmt.Println("  gmcore sdk make <name>                   Create a new SDK scaffold")
+	fmt.Println("")
+	fmt.Println("  gmcore make controller <name>            Generate a controller")
+	fmt.Println("  gmcore make entity <name> [fields]       Generate an entity/model")
+	fmt.Println("  gmcore make form <name> [fields]         Generate a form type")
+	fmt.Println("  gmcore make service <name>               Generate a service")
+	fmt.Println("  gmcore make repository <name> <entity>   Generate a CRUD repository")
+	fmt.Println("  gmcore make migration <name>             Generate a migration")
 	fmt.Println("")
 	fmt.Println("  gmcore update [app] [flags]              Update framework, SDKs, or skeleton")
 	fmt.Println("  gmcore self-update [version]             Update CLI to latest or specific version")
@@ -1367,6 +1383,100 @@ func handleBundleInstall(args []string) {
 	}
 }
 
+func handleMakeScope(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: gmcore make <controller|entity|form|service|repository|migration> ...")
+		os.Exit(1)
+	}
+
+	subcmd := args[0]
+	rest := args[1:]
+
+	cwd, _ := os.Getwd()
+	maker := gmcore_maker.New(cwd)
+
+	switch subcmd {
+	case "controller":
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "Usage: gmcore make controller <name>")
+			os.Exit(1)
+		}
+		maker.MakeController(rest[0])
+		fmt.Printf("Controller %q generated\n", rest[0])
+
+	case "entity":
+		if len(rest) < 1 {
+			maker.MakeEntityInteractive()
+			return
+		}
+		if len(rest) == 1 {
+			maker.MakeEntityInteractive()
+			return
+		}
+		maker.MakeEntity(rest[0], rest[1:])
+		fmt.Printf("Entity %q generated\n", rest[0])
+
+	case "form":
+		if len(rest) < 1 {
+			maker.MakeFormInteractive()
+			return
+		}
+		if len(rest) == 1 {
+			maker.MakeFormInteractive()
+			return
+		}
+		maker.MakeForm(rest[0], rest[1:])
+		fmt.Printf("Form %q generated\n", rest[0])
+
+	case "service":
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "Usage: gmcore make service <name>")
+			os.Exit(1)
+		}
+		maker.MakeService(rest[0])
+		fmt.Printf("Service %q generated\n", rest[0])
+
+	case "repository":
+		if len(rest) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: gmcore make repository <name> <entity>")
+			os.Exit(1)
+		}
+		maker.MakeRepository(rest[0], rest[1])
+		fmt.Printf("Repository %q generated\n", rest[0])
+
+	case "migration":
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "Usage: gmcore make migration <name>")
+			os.Exit(1)
+		}
+		maker.MakeMigration(rest[0])
+		fmt.Printf("Migration %q generated\n", rest[0])
+
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown make subcommand: %s\n", subcmd)
+		fmt.Fprintln(os.Stderr, "Available: controller, entity, form, service, repository, migration")
+		os.Exit(1)
+	}
+}
+
+func parseMakeFields(args []string) []gmcore_maker.Field {
+	var fields []gmcore_maker.Field
+	for _, arg := range args {
+		parts := strings.SplitN(arg, ":", 3)
+		if len(parts) >= 2 {
+			field := gmcore_maker.Field{
+				Name: parts[0],
+				Type: parts[1],
+			}
+			if len(parts) == 3 {
+				field.Tag = parts[2]
+			}
+			fields = append(fields, field)
+		}
+	}
+	return fields
+}
+
 func handleUpdate(args []string) {
 	target := update.TargetAll
 	version := "latest"
@@ -1464,4 +1574,125 @@ func printUpdateUsage() {
 	fmt.Println("")
 	fmt.Println("Rollback backups are stored at:")
 	fmt.Println("  <app-directory>/var/backups/<target>_<version>_<timestamp>.tar.gz")
+}
+
+func handleSDKScope(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: gmcore sdk <make|list>")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Commands:")
+		fmt.Fprintln(os.Stderr, "  make <name>    Create a new SDK scaffold")
+		fmt.Fprintln(os.Stderr, "  list           List available SDKs")
+		os.Exit(1)
+	}
+
+	subcmd := args[0]
+	rest := args[1:]
+
+	switch subcmd {
+	case "make":
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "Usage: gmcore sdk make <name>")
+			fmt.Fprintln(os.Stderr, "")
+			fmt.Fprintln(os.Stderr, "Creates a new SDK scaffold at packages/sdks/gmcore-{name}/")
+			fmt.Fprintln(os.Stderr, "")
+			fmt.Fprintln(os.Stderr, "Example:")
+			fmt.Fprintln(os.Stderr, "  gmcore sdk make my-service")
+			os.Exit(1)
+		}
+		sdkName := rest[0]
+		if err := createSDKScaffold(sdkName); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("SDK 'gmcore-%s' scaffold created at packages/sdks/gmcore-%s/\n", sdkName, sdkName)
+		fmt.Println("")
+		fmt.Println("Next steps:")
+		fmt.Printf("  1. Edit packages/sdks/gmcore-%s/%s.go\n", sdkName, sdkName)
+		fmt.Printf("  2. Add .go files with public API\n")
+		fmt.Printf("  3. Run go mod tidy in the SDK directory\n")
+
+	case "list":
+		listSDKs()
+
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown sdk command: %s\n", subcmd)
+		fmt.Fprintln(os.Stderr, "Usage: gmcore sdk <make|list>")
+		os.Exit(1)
+	}
+}
+
+func createSDKScaffold(sdkName string) error {
+	sdkName = strings.TrimSpace(sdkName)
+	if sdkName == "" {
+		return fmt.Errorf("SDK name cannot be empty")
+	}
+
+	packagesDir := filepath.Join(getBasePath(), "packages", "sdks")
+	if _, err := os.Stat(packagesDir); os.IsNotExist(err) {
+		cwd, _ := os.Getwd()
+		packagesDir = filepath.Join(cwd, "packages", "sdks")
+	}
+
+	sdkDir := filepath.Join(packagesDir, "gmcore-"+sdkName)
+	if _, err := os.Stat(sdkDir); err == nil {
+		return fmt.Errorf("SDK directory already exists: %s", sdkDir)
+	}
+
+	if err := os.MkdirAll(filepath.Join(sdkDir, "internal"), 0755); err != nil {
+		return fmt.Errorf("failed to create SDK directory: %w", err)
+	}
+
+	goModContent := fmt.Sprintf("module github.com/gmcorenet/sdk/gmcore-%s\n\ngo 1.21\n", sdkName)
+	if err := os.WriteFile(filepath.Join(sdkDir, "go.mod"), []byte(goModContent), 0644); err != nil {
+		return err
+	}
+
+	os.WriteFile(filepath.Join(sdkDir, "go.sum"), []byte(""), 0644)
+
+	readmeContent := fmt.Sprintf("# gmcore-%s\n\nGMCore SDK for %s functionality.\n\n## Usage\n\n```go\nimport gmcore_%s \"github.com/gmcorenet/sdk/gmcore-%s\"\n```\n\n## API\n\nSee %s.go for the public API.\n", sdkName, sdkName, sdkName, sdkName, sdkName)
+	if err := os.WriteFile(filepath.Join(sdkDir, "README.md"), []byte(readmeContent), 0644); err != nil {
+		return err
+	}
+
+	pkgName := strings.ReplaceAll(sdkName, "-", "_")
+	versionContent := fmt.Sprintf("package %s\n\nconst Version = \"1.0.0\"\n", pkgName)
+	if err := os.WriteFile(filepath.Join(sdkDir, "internal", "version.go"), []byte(versionContent), 0644); err != nil {
+		return err
+	}
+
+	mainFileContent := fmt.Sprintf("package %s\n\nimport \"github.com/gmcorenet/sdk/gmcore-%s/internal\"\n\nfunc Version() string {\n\treturn internal.Version\n}\n", pkgName, sdkName)
+	if err := os.WriteFile(filepath.Join(sdkDir, sdkName+".go"), []byte(mainFileContent), 0644); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func listSDKs() {
+	packagesDir := filepath.Join(getBasePath(), "packages", "sdks")
+	if _, err := os.Stat(packagesDir); os.IsNotExist(err) {
+		cwd, _ := os.Getwd()
+		packagesDir = filepath.Join(cwd, "packages", "sdks")
+	}
+
+	entries, err := os.ReadDir(packagesDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return
+	}
+
+	fmt.Println("Available SDKs:")
+	fmt.Println("")
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "gmcore-") {
+			continue
+		}
+		count++
+		fmt.Printf("  %s\n", entry.Name())
+	}
+	if count == 0 {
+		fmt.Println("  (no SDKs found)")
+	}
 }
