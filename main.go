@@ -18,9 +18,11 @@ import (
 	"github.com/gmcorenet/gmcore/internal/download"
 	"github.com/gmcorenet/gmcore/internal/installer"
 	"github.com/gmcorenet/gmcore/internal/manifest"
+	"github.com/gmcorenet/gmcore/internal/sdk"
 	"github.com/gmcorenet/gmcore/internal/update"
 	"github.com/gmcorenet/gmcore/internal/version"
 	gmcore_maker "github.com/gmcorenet/sdk-gmcore-maker"
+	"gopkg.in/yaml.v3"
 )
 
 const cliVersion = "v0.5.0"
@@ -51,6 +53,24 @@ func main() {
 
 	case "sdk":
 		handleSDKScope(os.Args[2:])
+
+	case "status":
+		useJSON := false
+		for _, a := range os.Args[2:] {
+			if a == "--json" {
+				useJSON = true
+			}
+		}
+		appName := ""
+		for _, a := range os.Args[2:] {
+			if !strings.HasPrefix(a, "--") && appName == "" {
+				appName = a
+			}
+		}
+		if err := handleStatus(appName, useJSON); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
 
 	case "make":
 		handleMakeScope(os.Args[2:])
@@ -153,10 +173,15 @@ func handleAppScope(args []string) {
 
 	case "status":
 		appName := ""
-		if len(rest) >= 1 {
-			appName = rest[0]
+		useJSON := false
+		for _, a := range rest {
+			if a == "--json" {
+				useJSON = true
+			} else if !strings.HasPrefix(a, "--") && appName == "" {
+				appName = a
+			}
 		}
-		if err := statusApps(appName); err != nil {
+		if err := statusApps(appName, useJSON); err != nil {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 			os.Exit(1)
 		}
@@ -168,7 +193,7 @@ func handleAppScope(args []string) {
 		}
 
 	case "worker":
-		if err := handleAppWorkerCommand(rest); err != nil {
+		if err := handleAppModeCommand("worker", rest); err != nil {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 			os.Exit(1)
 		}
@@ -180,7 +205,7 @@ func handleAppScope(args []string) {
 		}
 
 	case "scheduler":
-		if err := handleAppSchedulerCommand(rest); err != nil {
+		if err := handleAppModeCommand("scheduler", rest); err != nil {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 			os.Exit(1)
 		}
@@ -200,12 +225,13 @@ func handleAppScope(args []string) {
 
 func handleBundleScope(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: gmcore bundle <make|install|list>")
+		fmt.Fprintln(os.Stderr, "Usage: gmcore bundle <make|install|list|remove>")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Commands:")
 		fmt.Fprintln(os.Stderr, "  make <name>        Create a new bundle scaffold")
 		fmt.Fprintln(os.Stderr, "  install <name>     Install a bundle from the registry")
 		fmt.Fprintln(os.Stderr, "  list               List available bundles")
+		fmt.Fprintln(os.Stderr, "  remove <name>      Remove an installed bundle")
 		os.Exit(1)
 	}
 
@@ -222,9 +248,11 @@ func handleBundleScope(args []string) {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 			os.Exit(1)
 		}
+	case "remove":
+		handleBundleRemove(rest)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown bundle command: %s\n", subcmd)
-		fmt.Fprintln(os.Stderr, "Usage: gmcore bundle <make|install|list>")
+		fmt.Fprintln(os.Stderr, "Usage: gmcore bundle <make|install|list|remove>")
 		os.Exit(1)
 	}
 }
@@ -353,21 +381,27 @@ func printUsage() {
 	fmt.Println("  gmcore app create <appname>              Create a new GMCore application")
 	fmt.Println("  gmcore app remove <appname> [--purge]    Remove an application")
 	fmt.Println("  gmcore app list                          List installed applications")
-	fmt.Println("  gmcore app status [appname]              Show application status")
+	fmt.Println("  gmcore app status [appname] [--json]     Show application status")
 	fmt.Println("  gmcore app start [appname]               Start an application")
 	fmt.Println("  gmcore app stop [appname]                Stop an application")
 	fmt.Println("  gmcore app restart [appname]             Restart an application")
 	fmt.Println("  gmcore app reload [appname]              Reload an application")
-	fmt.Println("  gmcore app worker <appname>              Start messenger worker")
-	fmt.Println("  gmcore app migrate <appname> [--rollback] Run/rollback migrations")
-	fmt.Println("  gmcore app scheduler <appname>           Start scheduler daemon")
+	fmt.Println("  gmcore app worker <appname>              Start messenger worker (thin wrapper)")
+	fmt.Println("  gmcore app migrate <appname> [--rollback] Run/rollback migrations (thin wrapper)")
+	fmt.Println("  gmcore app scheduler <appname>           Start scheduler daemon (thin wrapper)")
 	fmt.Println("  gmcore app versions                      List available framework versions")
 	fmt.Println("")
 	fmt.Println("  gmcore bundle make <name>                Create a new bundle scaffold")
 	fmt.Println("  gmcore bundle install <name>             Install a bundle from the registry")
 	fmt.Println("  gmcore bundle list                       List available bundles")
+	fmt.Println("  gmcore bundle remove <name>              Remove an installed bundle")
 	fmt.Println("")
 	fmt.Println("  gmcore sdk make <name>                   Create a new SDK scaffold")
+	fmt.Println("  gmcore sdk install <name>                Install an SDK from the registry")
+	fmt.Println("  gmcore sdk list [--tier=...]             List available SDKs from manifest")
+	fmt.Println("  gmcore sdk remove <name>                 Remove an installed SDK")
+	fmt.Println("")
+	fmt.Println("  gmcore status [appname] [--json]         Show status of all/specific apps")
 	fmt.Println("")
 	fmt.Println("  gmcore make controller <name>            Generate a controller")
 	fmt.Println("  gmcore make entity <name> [fields]       Generate an entity/model")
@@ -393,6 +427,9 @@ func printUsage() {
 	fmt.Println("Examples:")
 	fmt.Println("  gmcore app create myapp")
 	fmt.Println("  gmcore app remove myapp --purge")
+	fmt.Println("  gmcore status --json")
+	fmt.Println("  gmcore sdk install gmcore-auth --tier=approved")
+	fmt.Println("  gmcore sdk list --tier=official")
 	fmt.Println("  gmcore update myapp --target=all --rollback")
 	fmt.Println("  sudo gmcore uninstall --purge --confirm-purge")
 	fmt.Println("  cd <app-directory> && gmcore cache:clear")
@@ -928,14 +965,49 @@ func listApps() error {
 	return nil
 }
 
-func statusApps(appName string) error {
+func statusApps(appName string, useJSON bool) error {
 	if appName != "" {
-		return statusSingleApp(appName)
+		return statusSingleApp(appName, useJSON)
 	}
 
 	entries, err := apps.List(getBasePath())
 	if err != nil {
 		return fmt.Errorf("failed to list applications: %w", err)
+	}
+
+	if useJSON {
+		type appInfo struct {
+			Name     string `json:"name"`
+			Status   string `json:"status"`
+			PID      int    `json:"pid"`
+			Exposure string `json:"exposure"`
+			Healthy  bool   `json:"healthy"`
+		}
+		var result []appInfo
+		for _, entry := range entries {
+			running, pid, _ := pidStatus(entry.Path)
+			status := "stopped"
+			if running {
+				status = "running"
+			}
+			if !running && processRunningForAppUser(entry.Name) {
+				running = true
+				status = "running"
+			}
+			healthy := false
+			if running {
+				healthy = checkHealth(entry)
+			}
+			result = append(result, appInfo{
+				Name:     entry.Name,
+				Status:   status,
+				PID:      pid,
+				Exposure: readExposureMode(entry.Path),
+				Healthy:  healthy,
+			})
+		}
+		json.NewEncoder(os.Stdout).Encode(result)
+		return nil
 	}
 
 	fmt.Println("Application status:")
@@ -948,10 +1020,39 @@ func statusApps(appName string) error {
 	return nil
 }
 
-func statusSingleApp(appName string) error {
+func statusSingleApp(appName string, useJSON bool) error {
 	entry, err := apps.ResolveByName(getBasePath(), appName)
 	if err != nil {
 		return err
+	}
+
+	running, pid, _ := pidStatus(entry.Path)
+	status := "stopped"
+	if running {
+		status = "running"
+	}
+	if !running && processRunningForAppUser(entry.Name) {
+		status = "running"
+	}
+	exposure := readExposureMode(entry.Path)
+	healthy := false
+	if status == "running" {
+		healthy = checkHealth(entry)
+	}
+
+	if useJSON {
+		cfg := readAppServerConfig(entry.Path)
+		json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+			"name":     entry.Name,
+			"path":     entry.Path,
+			"status":   status,
+			"pid":      pid,
+			"exposure": exposure,
+			"healthy":  healthy,
+			"host":     cfg.Host,
+			"port":     cfg.Port,
+		})
+		return nil
 	}
 
 	printAppStatus(entry)
@@ -972,15 +1073,75 @@ func printAppStatus(entry apps.Entry) {
 	}
 
 	exposureMode := readExposureMode(entry.Path)
+	healthy := ""
+	if status == "running" {
+		if checkHealth(entry) {
+			healthy = " healthy"
+		}
+	}
+
 	if running && pid > 0 {
-		fmt.Printf("  %s - %s (pid=%d, exposure=%s)\n", entry.Name, status, pid, exposureMode)
+		fmt.Printf("  %s - %s%s (pid=%d, exposure=%s)\n", entry.Name, status, healthy, pid, exposureMode)
 		return
 	}
 	if running {
-		fmt.Printf("  %s - %s (exposure=%s)\n", entry.Name, status, exposureMode)
+		fmt.Printf("  %s - %s%s (exposure=%s)\n", entry.Name, status, healthy, exposureMode)
 		return
 	}
 	fmt.Printf("  %s - %s (exposure=%s)\n", entry.Name, status, exposureMode)
+}
+
+func handleStatus(appName string, useJSON bool) error {
+	return statusApps(appName, useJSON)
+}
+
+type serverConfig struct {
+	Host string
+	Port string
+}
+
+func readAppServerConfig(appPath string) serverConfig {
+	cfg := serverConfig{Host: "127.0.0.1", Port: "8080"}
+
+	manifestPath := filepath.Join(appPath, "manifest.yaml")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return cfg
+	}
+
+	var manifest struct {
+		Server struct {
+			Host string `yaml:"host"`
+			Port string `yaml:"port"`
+		} `yaml:"server"`
+	}
+	if err := yaml.Unmarshal(data, &manifest); err != nil {
+		return cfg
+	}
+	if manifest.Server.Host != "" {
+		cfg.Host = manifest.Server.Host
+	}
+	if manifest.Server.Port != "" {
+		cfg.Port = manifest.Server.Port
+	}
+	return cfg
+}
+
+func checkHealth(entry apps.Entry) bool {
+	cfg := readAppServerConfig(entry.Path)
+
+	healthURL := fmt.Sprintf("http://%s:%s/health", cfg.Host, cfg.Port)
+	if cfg.Host == "0.0.0.0" {
+		healthURL = fmt.Sprintf("http://127.0.0.1:%s/health", cfg.Port)
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(healthURL)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 400
 }
 
 func selfUpdate(targetVersion string) error {
@@ -1428,6 +1589,38 @@ func handleBundleInstall(args []string) {
 	}
 }
 
+func handleBundleRemove(args []string) {
+	bundleName := ""
+
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "--") && bundleName == "" {
+			bundleName = arg
+		}
+	}
+
+	if bundleName == "" {
+		fmt.Fprintln(os.Stderr, "Usage: gmcore bundle remove <name>")
+		os.Exit(1)
+	}
+
+	cwd, _ := os.Getwd()
+	bundlesDir := filepath.Join(cwd, "packages", "bundles", bundleName)
+	if _, err := os.Stat(bundlesDir); os.IsNotExist(err) {
+		bundlesDir = filepath.Join(getBasePath(), "packages", "bundles", bundleName)
+	}
+	if _, err := os.Stat(bundlesDir); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Bundle not found: %s\n", bundleName)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Removing bundle %s from %s...\n", bundleName, bundlesDir)
+	if err := os.RemoveAll(bundlesDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to remove bundle: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Bundle %s removed.\n", bundleName)
+}
+
 func handleMakeScope(args []string) {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "Usage: gmcore make <controller|entity|form|service|repository|migration> ...")
@@ -1623,11 +1816,13 @@ func printUpdateUsage() {
 
 func handleSDKScope(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: gmcore sdk <make|list>")
+		fmt.Fprintln(os.Stderr, "Usage: gmcore sdk <make|install|list|remove>")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Commands:")
-		fmt.Fprintln(os.Stderr, "  make <name>    Create a new SDK scaffold")
-		fmt.Fprintln(os.Stderr, "  list           List available SDKs")
+		fmt.Fprintln(os.Stderr, "  make <name>        Create a new SDK scaffold")
+		fmt.Fprintln(os.Stderr, "  install <name>     Install an SDK from the registry")
+		fmt.Fprintln(os.Stderr, "  list [--tier=...]  List available SDKs")
+		fmt.Fprintln(os.Stderr, "  remove <name>      Remove an installed SDK")
 		os.Exit(1)
 	}
 
@@ -1657,12 +1852,18 @@ func handleSDKScope(args []string) {
 		fmt.Printf("  2. Add .go files with public API\n")
 		fmt.Printf("  3. Run go mod tidy in the SDK directory\n")
 
+	case "install":
+		handleSDKInstall(rest)
+
 	case "list":
-		listSDKs()
+		handleSDKListCmd(rest)
+
+	case "remove":
+		handleSDKRemove(rest)
 
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown sdk command: %s\n", subcmd)
-		fmt.Fprintln(os.Stderr, "Usage: gmcore sdk <make|list>")
+		fmt.Fprintln(os.Stderr, "Usage: gmcore sdk <make|install|list|remove>")
 		os.Exit(1)
 	}
 }
@@ -1715,34 +1916,178 @@ func createSDKScaffold(sdkName string) error {
 }
 
 func listSDKs() {
-	packagesDir := filepath.Join(getBasePath(), "packages", "sdks")
-	if _, err := os.Stat(packagesDir); os.IsNotExist(err) {
-		cwd, _ := os.Getwd()
-		packagesDir = filepath.Join(cwd, "packages", "sdks")
+	handleSDKListCmd(nil)
+}
+
+func handleSDKInstall(args []string) {
+	tier := ""
+	name := ""
+	version := "latest"
+
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--tier=") {
+			tier = strings.TrimPrefix(arg, "--tier=")
+		} else if strings.HasPrefix(arg, "--version=") {
+			version = strings.TrimPrefix(arg, "--version=")
+		} else if !strings.HasPrefix(arg, "--") && name == "" {
+			name = arg
+		}
 	}
 
-	entries, err := os.ReadDir(packagesDir)
+	if name == "" {
+		fmt.Fprintln(os.Stderr, "Usage: gmcore sdk install <name> [--tier=official] [--version=latest]")
+		os.Exit(1)
+	}
+
+	m, err := sdk.FetchManifest()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error fetching SDK manifest: %v\n", err)
+		os.Exit(1)
+	}
+
+	entry, ok := m.GetSDK(name)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "SDK not found in registry: %s\n", name)
+		fmt.Fprintf(os.Stderr, "Use 'gmcore sdk list' to see available SDKs\n")
+		os.Exit(1)
+	}
+
+	if tier != "" && entry.Tier != tier {
+		fmt.Fprintf(os.Stderr, "SDK %s is in tier '%s', not '%s'\n", name, entry.Tier, tier)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Installing SDK %s (%s tier, %s category)...\n", name, entry.Tier, entry.Category)
+	fmt.Printf("  Module: %s\n", entry.Module)
+	fmt.Printf("  Repo:   %s\n", entry.Repo)
+	fmt.Printf("  Desc:   %s\n", entry.Description)
+	fmt.Println("")
+
+	cwd, _ := os.Getwd()
+	sdksDir := filepath.Join(cwd, "packages", "sdks", "gmcore-"+name)
+	if _, err := os.Stat(sdksDir); err == nil {
+		fmt.Printf("SDK already installed at %s\n", sdksDir)
+		fmt.Printf("  To update, use: cd %s && git pull\n", sdksDir)
 		return
 	}
 
-	fmt.Println("Available SDKs:")
-	fmt.Println("")
-	count := 0
-	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "gmcore-") {
-			continue
+	cloneCmd := exec.Command("git", "clone", entry.Repo+".git", sdksDir)
+	cloneCmd.Stdout = os.Stdout
+	cloneCmd.Stderr = os.Stderr
+	if err := cloneCmd.Run(); err != nil {
+		if version != "latest" {
+			checkoutCmd := exec.Command("git", "clone", "--branch", version, entry.Repo+".git", sdksDir)
+			checkoutCmd.Stdout = os.Stdout
+			checkoutCmd.Stderr = os.Stderr
+			if err := checkoutCmd.Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to clone SDK: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "Failed to clone SDK: %v\n", err)
+			os.Exit(1)
 		}
-		count++
-		fmt.Printf("  %s\n", entry.Name())
 	}
-	if count == 0 {
-		fmt.Println("  (no SDKs found)")
+
+	fmt.Printf("SDK %s installed successfully at %s\n", name, sdksDir)
+	fmt.Println("")
+	fmt.Printf("Add to your app's go.mod:\n")
+	fmt.Printf("  replace %s => ../../packages/sdks/gmcore-%s\n", entry.Module, name)
+}
+
+func handleSDKListCmd(args []string) {
+	tierFilter := ""
+	categoryFilter := ""
+
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--tier=") {
+			tierFilter = strings.TrimPrefix(arg, "--tier=")
+		} else if strings.HasPrefix(arg, "--category=") {
+			categoryFilter = strings.TrimPrefix(arg, "--category=")
+		}
+	}
+
+	m, err := sdk.FetchManifest()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error fetching SDK manifest: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Trying local...\n")
+		localManifest := filepath.Join(getBasePath(), "packages", "sdk-manifest", "manifest.yaml")
+		if data, readErr := os.ReadFile(localManifest); readErr == nil {
+			if m, err = sdk.Parse(data); err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to parse local manifest: %v\n", err)
+				return
+			}
+		} else {
+			return
+		}
+	}
+
+	sdks := m.ListSDKs(tierFilter)
+
+	if categoryFilter != "" {
+		filtered := make([]sdk.SDKEntry, 0)
+		for _, sk := range sdks {
+			if sk.Category == categoryFilter {
+				filtered = append(filtered, sk)
+			}
+		}
+		sdks = filtered
+	}
+
+	header := "Available SDKs"
+	if tierFilter != "" {
+		header += " (tier: " + tierFilter + ")"
+	}
+	if categoryFilter != "" {
+		header += " (category: " + categoryFilter + ")"
+	}
+	fmt.Printf("%s:\n\n", header)
+
+	counts := map[string]int{}
+	for _, sk := range sdks {
+		counts[sk.Tier]++
+	}
+	fmt.Printf("  Total: %d  Official: %d  Approved: %d  Wild: %d\n\n",
+		len(sdks), counts["official"], counts["approved"], counts["wild"])
+
+	for _, sk := range sdks {
+		fmt.Printf("  [%s] %-25s v%-7s %s\n", sk.Tier[:1], sk.Name, sk.Version, sk.Description)
+	}
+
+	if len(sdks) == 0 {
+		fmt.Println("  (no SDKs match the filter)")
 	}
 }
 
-func handleAppWorkerCommand(args []string) error {
+func handleSDKRemove(args []string) {
+	name := ""
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "--") && name == "" {
+			name = arg
+		}
+	}
+
+	if name == "" {
+		fmt.Fprintln(os.Stderr, "Usage: gmcore sdk remove <name>")
+		os.Exit(1)
+	}
+
+	cwd, _ := os.Getwd()
+	sdksDir := filepath.Join(cwd, "packages", "sdks", "gmcore-"+name)
+	if _, err := os.Stat(sdksDir); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "SDK not found at %s\n", sdksDir)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Removing SDK %s from %s...\n", name, sdksDir)
+	if err := os.RemoveAll(sdksDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to remove SDK: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("SDK %s removed. Remember to update your app's go.mod.\n", name)
+}
+
+func handleAppModeCommand(mode string, args []string) error {
 	appName := ""
 	for _, a := range args {
 		if !strings.HasPrefix(a, "--") && appName == "" {
@@ -1753,7 +2098,7 @@ func handleAppWorkerCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	return runAppMode(entry, "worker")
+	return runAppMode(entry, mode)
 }
 
 func handleAppMigrateCommand(args []string) error {
@@ -1777,27 +2122,16 @@ func handleAppMigrateCommand(args []string) error {
 	return runAppMode(entry, mode)
 }
 
-func handleAppSchedulerCommand(args []string) error {
-	appName := ""
-	for _, a := range args {
-		if !strings.HasPrefix(a, "--") && appName == "" {
-			appName = a
-		}
-	}
-	entry, err := resolveLifecycleTarget(appName)
-	if err != nil {
-		return err
-	}
-	return runAppMode(entry, "scheduler")
-}
-
 func runAppMode(entry apps.Entry, mode string) error {
-	if err := compileApp(entry); err != nil {
-		return err
-	}
 	binaryPath, err := resolveAppBinary(entry.Path, entry.Name)
 	if err != nil {
-		return err
+		if compileErr := compileApp(entry); compileErr != nil {
+			return fmt.Errorf("app binary not found and build failed: %w", compileErr)
+		}
+		binaryPath, err = resolveAppBinary(entry.Path, entry.Name)
+		if err != nil {
+			return err
+		}
 	}
 	cmd := exec.Command(binaryPath)
 	cmd.Dir = entry.Path
@@ -1813,27 +2147,9 @@ func runAppMode(entry apps.Entry, mode string) error {
 }
 
 func runAppModeLocal(appRoot string, mode string) error {
-	appName := filepath.Base(appRoot)
 	entry := apps.Entry{
-		Name: appName,
+		Name: filepath.Base(appRoot),
 		Path: appRoot,
 	}
-	if err := compileApp(entry); err != nil {
-		return err
-	}
-	binaryPath, err := resolveAppBinary(appRoot, appName)
-	if err != nil {
-		return err
-	}
-	cmd := exec.Command(binaryPath)
-	cmd.Dir = appRoot
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = append(os.Environ(),
-		"GMCORE_APP_ROOT="+appRoot,
-		"GMCORE_APP_NAME="+appName,
-		"GMCORE_MODE="+mode,
-	)
-	return cmd.Run()
+	return runAppMode(entry, mode)
 }
