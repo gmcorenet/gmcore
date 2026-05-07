@@ -1,0 +1,4 @@
+name: gmcore
+version: 0.5.0
+type: app
+description: GMCore CLI — manage applications, bundles, SDKs, and the framework lifecycle
