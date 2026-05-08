@@ -53,9 +53,15 @@ type transportConfigForCLI struct {
 func handleLifecycleCommand(action string, args []string) error {
 	appName := ""
 	hotReload := false
+	forceBuild := false
+	verbose := false
 	for _, a := range args {
 		if a == "--hot-reload" || a == "-w" {
 			hotReload = true
+		} else if a == "--build" || a == "-b" {
+			forceBuild = true
+		} else if a == "--verbose" || a == "-v" {
+			verbose = true
 		} else if !strings.HasPrefix(a, "--") && appName == "" {
 			appName = strings.TrimSpace(a)
 		}
@@ -68,14 +74,14 @@ func handleLifecycleCommand(action string, args []string) error {
 
 	switch action {
 	case "start":
-		return startManagedApp(entry, hotReload)
+		return startManagedApp(entry, hotReload, forceBuild, verbose)
 	case "stop":
 		return stopManagedApp(entry)
 	case "restart":
 		if err := stopManagedApp(entry); err != nil {
 			return err
 		}
-		return startManagedApp(entry, hotReload)
+		return startManagedApp(entry, hotReload, forceBuild, verbose)
 	case "reload":
 		return reloadManagedApp(entry)
 	default:
@@ -101,11 +107,7 @@ func resolveLifecycleTarget(appName string) (apps.Entry, error) {
 	}, nil
 }
 
-func startManagedApp(entry apps.Entry, hotReload bool) error {
-	if err := requireRoot(); err != nil {
-		return fmt.Errorf("starting an app %s", err)
-	}
-
+func startManagedApp(entry apps.Entry, hotReload, forceBuild, verbose bool) error {
 	if running, _, err := pidStatus(entry.Path); err == nil && running {
 		fmt.Printf("Application %s is already running\n", entry.Name)
 		return nil
@@ -122,8 +124,12 @@ func startManagedApp(entry apps.Entry, hotReload bool) error {
 		return startWithHotReload(entry)
 	}
 
-	if err := compileApp(entry); err != nil {
-		return fmt.Errorf("build failed: %w", err)
+	if !forceBuild && binaryExists(entry) {
+		fmt.Printf("Binary exists, skipping build. Use --build to force recompile.\n")
+	} else {
+		if err := compileApp(entry); err != nil {
+			return fmt.Errorf("build failed: %w", err)
+		}
 	}
 
 	binaryPath, err := resolveAppBinary(entry.Path, entry.Name)
@@ -138,34 +144,40 @@ func startManagedApp(entry apps.Entry, hotReload bool) error {
 		return fmt.Errorf("failed to create log directory: %w", err)
 	}
 
-	logPath := filepath.Join(entry.Path, "var", "log", "app.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open app log: %w", err)
-	}
-
 	cmd := exec.Command(binaryPath)
 	cmd.Dir = entry.Path
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
 	cmd.Env = append(os.Environ(),
 		"GMCORE_APP_ROOT="+entry.Path,
 		"GMCORE_APP_NAME="+entry.Name,
 		"GMCORE_MANAGED_LAUNCH=1",
 	)
 
+	if verbose {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	} else {
+		logPath := filepath.Join(entry.Path, "var", "log", "app.log")
+		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return fmt.Errorf("failed to open app log: %w", err)
+		}
+		defer logFile.Close()
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+	}
+
 	if err := cmd.Start(); err != nil {
-		logFile.Close()
 		return fmt.Errorf("failed to start app binary: %w", err)
 	}
 
 	pid := cmd.Process.Pid
-	if err := cmd.Process.Release(); err != nil {
-		logFile.Close()
-		return fmt.Errorf("failed to detach app process: %w", err)
+
+	if !verbose {
+		if err := cmd.Process.Release(); err != nil {
+			return fmt.Errorf("failed to detach app process: %w", err)
+		}
 	}
 
-	logFile.Close()
 	if err := writePIDFile(entry.Path, pid); err != nil {
 		return err
 	}
@@ -259,6 +271,11 @@ func resolveAppBinary(appPath, appName string) (string, error) {
 	}
 
 	return "", fmt.Errorf("app binary not found for %s under %s/bin", appName, appPath)
+}
+
+func binaryExists(entry apps.Entry) bool {
+	_, err := resolveAppBinary(entry.Path, entry.Name)
+	return err == nil
 }
 
 func pidFilePath(appPath string) string {
